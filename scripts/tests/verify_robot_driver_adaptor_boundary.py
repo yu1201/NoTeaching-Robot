@@ -12,6 +12,7 @@ ALLOWED = {
     Path("src/FANUCRobotDriver.cpp"),
     Path("src/StepRobotDriver.cpp"),
     Path("src/InovanceRobotDriver.cpp"),
+    Path("src/InovanceCalibration.cpp"),
     Path("src/RobotDriverRegistry.cpp"),
     Path("src/RobotFtpFileTransfer.cpp"),
     Path("src/FTPClient.cpp"),
@@ -23,6 +24,7 @@ ALLOWED = {
     Path("include/FANUCRobotDriver.h"),
     Path("include/STEPRobotDriver.h"),
     Path("include/InovanceRobotDriver.h"),
+    Path("include/InovanceWeldCalibration.h"),
     Path("include/FTPClient.h"),
     Path("include/RobotFtpFileTransfer.h"),
     Path("include/OnlineServicesConfig.h"),
@@ -93,19 +95,29 @@ required_contract = (
     "SetConfiguredGunTool(",
     "WriteLog(LogColor color, const char* format, ...) const",
     "MoveLinearMmPerMin(",
+    "MoveCircularMmPerMin(",
     "MoveJointPercent(",
     "ReadMotionStatus() = 0",
+    "ReadControllerStatus() = 0",
     "ReserveTrajectory(",
     "DownlinkTrajectory(",
     "StartTrajectory(",
     "WaitTrajectory(",
     "AbortCurrentProgramSafely() = 0",
+    "ServoOff() = 0",
     "TryGetCurrentPos(T_ROBOT_COORS& pos) = 0",
     "TryGetCurrentPulse(T_ANGLE_PULSE& pulse) = 0",
     "CheckRobotDone(int nDelayTime = 200, int runTimeoutMs = 1800000) = 0",
     "GetToolData(int nToolNo, T_ROBOT_COORS& robotToolData) = 0",
     "TryGetIntVar(int nIndex, int& value, const char* cStrPreFix = \"INT\") = 0",
+    "TryGetRealVar(",
     "GetHandEyeMatrixVariable(const char* variableName, double rotation[9], double translation[3], std::string* error = nullptr) = 0",
+    "ReadKinematicsReference(",
+    "CalculateControllerForward(",
+    "CalculateControllerInverse(",
+    "DiscoverCalibrationAssets(",
+    "ReadControllerHandEye(",
+    "ValidateControllerHandEyeContext(",
 )
 for token in required_contract:
     if token not in adaptor:
@@ -120,13 +132,37 @@ for implementation in (
         "ControlEndpoint() const",
         "CreateFileTransferSession(",
         "MoveLinearMmPerMin(",
+        "MoveCircularMmPerMin(",
         "ReadMotionStatus()",
+        "ReadControllerStatus()",
         "StartTrajectory(",
         "WaitTrajectory(",
         "AbortCurrentProgramSafely()",
+        "ServoOff()",
+        "TryGetRealVar(",
     ):
         if token not in text:
             fail(f"{implementation} does not implement required contract token: {token}")
+
+step_driver = (ROOT / "src/StepRobotDriver.cpp").read_text(encoding="utf-8")
+if "RobotDriverCapability::RealRegister" not in step_driver:
+    fail("STEP must advertise the completed real-register read/write contract")
+for token in ("VariableRealReadCmd", "VariableRealModifyCmd"):
+    if token not in step_driver:
+        fail(f"STEP real-register bottom is incomplete: {token}")
+step_set_real = step_driver.split("bool STEPRobotCtrl::SetRealVar(", 1)[1].split(
+    "bool STEPRobotCtrl::TryGetRealVar(", 1
+)[0]
+if "TryGetRealVar" not in step_set_real or "回读不一致" not in step_set_real:
+    fail("STEP real-register write must be verified by the adaptor read interface")
+
+fanuc_capabilities = (ROOT / "src/FanucRobotDriver.cpp").read_text(encoding="utf-8")
+fanuc_capability_body = fanuc_capabilities.split(
+    "std::uint64_t FANUCRobotCtrl::DriverCapabilities() const", 1
+)[1].split("RobotFileTransferProfile FANUCRobotCtrl::FileTransferProfile() const", 1)[0]
+for unsupported in ("CircularMotion", "RealRegister", "StructuredControllerStatus"):
+    if f"RobotDriverCapability::{unsupported}" in fanuc_capability_body:
+        fail(f"FANUC must not advertise unproved capability: {unsupported}")
 
 if '#include "FTPClient.h"' in adaptor or "ftpPassword" in adaptor:
     fail("RobotDriverAdaptor must declare FTP functionality without owning the FTP transport or credentials")

@@ -44,6 +44,122 @@ int main()
     const auto* firstDriver = &firstDriverStorage;
     const auto* secondDriver = &secondDriverStorage;
 
+    using Gate = SystemInterlock;
+    // 授权不能由账号开关、状态切换开关或重新登录解除。
+    RobotOperationLease::SetLicenseOperationsAllowed(false, QStringLiteral("license-suspended"));
+    RobotOperationLease::SetSystemInterlockForTest(Gate::AccountSession, false);
+    RobotOperationLease::SetSystemInterlockForTest(Gate::StateTransition, false);
+    RobotOperationLease::SetNewOperationsAllowed(true);
+    QString licenseReason;
+    Check(!RobotOperationLease::NewOperationsAllowed(), "editable interlocks bypassed license");
+    Check(!RobotOperationLease::TryAcquire(firstDriver, QStringLiteral("locked"), &licenseReason)
+        && licenseReason == QStringLiteral("license-suspended"), "license did not block admission");
+    RobotOperationLease::SetSystemInterlockForTest(Gate::MotionLeaseOwnership, false);
+    Check(!RobotOperationLease::MarkMotionStarted(firstDriver, false, &licenseReason)
+        && licenseReason == QStringLiteral("license-suspended"), "unleased motion bypassed license");
+    RobotOperationLease::SetSystemInterlockForTest(Gate::MotionLeaseOwnership, true);
+    WeldResumePlanner::CheckpointRecord resumeRecord;
+    RobotRecoverySafetyPolicy::ExclusiveRecoveryBinding resumeBinding;
+    Check(!RobotOperationLease::TryAcquirePausedResume(firstDriver, QStringLiteral("resume"),
+        resumeRecord, &resumeBinding, &licenseReason)
+        && licenseReason == QStringLiteral("license-suspended"), "paused resume bypassed license");
+    RobotOperationLease::TryAcquireSafetyRecovery(firstDriver, QStringLiteral("safe-retreat"),
+        resumeRecord, &resumeBinding, &licenseReason);
+    Check(licenseReason != QStringLiteral("license-suspended"), "license blocked safe recovery");
+    RobotOperationLease::SetLicenseOperationsAllowed(true);
+    RobotOperationLease::SetSystemInterlockForTest(Gate::AccountSession, true);
+    RobotOperationLease::SetSystemInterlockForTest(Gate::StateTransition, true);
+    RobotOperationLease::SetSystemInterlockForTest(Gate::AccountSession, false);
+    RobotOperationLease::SetNewOperationsAllowed(false, QStringLiteral("session"));
+    auto sessionBypass = RobotOperationLease::TryAcquire(firstDriver, QStringLiteral("session-bypass"));
+    Check(bool(sessionBypass), "independent session switch did not allow admission");
+    Check(!RobotOperationLease::TryAcquire(firstDriver, QStringLiteral("duplicate")),
+        "disabling session also disabled exclusive lease");
+    sessionBypass.reset();
+    const auto transition = RobotOperationLease::AddNewOperationsBlock(QStringLiteral("transition"));
+    Check(!RobotOperationLease::NewOperationsAllowed(), "session switch bypassed state transition");
+    RobotOperationLease::SetSystemInterlockForTest(Gate::StateTransition, false);
+    Check(RobotOperationLease::NewOperationsAllowed(), "independent transition switch failed");
+    RobotOperationLease::SetSystemInterlockForTest(Gate::AccountSession, true);
+    Check(!RobotOperationLease::NewOperationsAllowed(), "transition switch bypassed session gate");
+    RobotOperationLease::RemoveNewOperationsBlock(transition);
+    RobotOperationLease::SetNewOperationsAllowed(true);
+    RobotOperationLease::SetSystemInterlockForTest(Gate::StateTransition, true);
+
+    RobotDriverAdaptor noEndpoint;
+    Check(!RobotOperationLease::TryAcquire(&noEndpoint, QStringLiteral("invalid")),
+        "invalid endpoint admitted with gate enabled");
+    RobotOperationLease::SetSystemInterlockForTest(Gate::DriverEndpointIdentity, false);
+    auto local = RobotOperationLease::TryAcquire(&noEndpoint, QStringLiteral("local"));
+    Check(bool(local), "endpoint switch did not allow pointer-only lease");
+    Check(!RobotOperationLease::TryAcquire(&noEndpoint, QStringLiteral("local-duplicate")),
+        "endpoint switch bypassed exclusive lease");
+    local.reset();
+    RobotOperationLease::SetSystemInterlockForTest(Gate::DriverEndpointIdentity, true);
+
+    RobotOperationLease::SetSystemInterlockForTest(Gate::ExclusiveOperationLease, false);
+    auto concurrentA = RobotOperationLease::TryAcquire(firstDriver, QStringLiteral("a"));
+    auto concurrentB = RobotOperationLease::TryAcquire(firstDriver, QStringLiteral("b"));
+    Check(concurrentA && concurrentB, "independent exclusive lease switch failed");
+    Check(RobotOperationLease::MarkMotionStarted(firstDriver), "tracked motion failed");
+    Check(!RobotOperationLease::MarkMotionStarted(firstDriver), "exclusive switch bypassed motion terminal");
+    RobotOperationLease::SetSystemInterlockForTest(Gate::MotionTerminal, false);
+    Check(RobotOperationLease::MarkMotionStarted(firstDriver), "independent motion terminal switch failed");
+    RobotOperationLease::RequestCancellation(firstDriver);
+    Check(concurrentA->CancellationRequested() && concurrentB->CancellationRequested(),
+        "STOP did not reach all concurrent leases");
+    Check(!RobotOperationLease::MarkMotionStarted(firstDriver),
+        "disabling terminal bypassed current STOP cancellation");
+    RobotOperationLease::MarkMotionCompleted(firstDriver);
+    RobotOperationLease::ConfirmCancellationHandled(firstDriver);
+    concurrentA.reset();
+    Check(RobotOperationLease::AnyActive(), "releasing one lease erased its peer");
+    concurrentB.reset();
+    Check(!RobotOperationLease::AnyActive(), "concurrent leases leaked");
+    RobotOperationLease::SetSystemInterlockForTest(Gate::ExclusiveOperationLease, true);
+    RobotOperationLease::SetSystemInterlockForTest(Gate::MotionTerminal, true);
+
+    RobotOperationLease::SetSystemInterlockForTest(Gate::ExclusiveOperationLease, false);
+    auto pendingOwner = RobotOperationLease::TryAcquire(firstDriver, QStringLiteral("pending-owner"));
+    Check(pendingOwner && RobotOperationLease::MarkMotionStarted(firstDriver), "pending owner fixture failed");
+    auto idlePeer = RobotOperationLease::TryAcquire(firstDriver, QStringLiteral("idle-peer"));
+    Check(bool(idlePeer), "late concurrent peer was not admitted");
+    RobotOperationLease::RequestCancellation(firstDriver);
+    pendingOwner.reset();
+    RobotOperationLease::RequestCancellation(firstDriver);
+    Check(RobotOperationLease::MotionCompletionPending(firstDriver), "idle peer cancellation erased unresolved motion");
+    RobotOperationLease::LatchGlobalCancellation(firstDriver);
+    Check(RobotOperationLease::MotionCompletionPending(firstDriver), "global cancellation erased unresolved motion");
+    RobotOperationLease::ConfirmCancellationHandled(firstDriver);
+    idlePeer.reset();
+    Check(!RobotOperationLease::AnyActive(), "pending peer cleanup failed");
+    RobotOperationLease::SetSystemInterlockForTest(Gate::ExclusiveOperationLease, true);
+
+    Check(!RobotOperationLease::MarkMotionStarted(firstDriver), "motion without lease admitted");
+    RobotOperationLease::SetSystemInterlockForTest(Gate::MotionLeaseOwnership, false);
+    Check(RobotOperationLease::MarkMotionStarted(firstDriver), "independent ownership switch failed");
+    Check(!RobotOperationLease::MarkMotionStarted(firstDriver),
+        "ownership switch bypassed terminal tracking without lease");
+    RobotOperationLease::MarkMotionCompleted(firstDriver);
+    Check(!RobotOperationLease::AnyActive(), "unleased motion tracking leaked");
+    RobotOperationLease::SetSystemInterlockForTest(Gate::MotionLeaseOwnership, true);
+
+    RobotOperationLease::LatchGlobalCancellation(firstDriver);
+    Check(!RobotOperationLease::TryAcquire(firstDriver, QStringLiteral("stopped")),
+        "unverified STOP did not block acquisition");
+    RobotOperationLease::SetSystemInterlockForTest(Gate::VerifiedStop, false);
+    auto stopBypass = RobotOperationLease::TryAcquire(firstDriver, QStringLiteral("stop-bypass"));
+    Check(bool(stopBypass), "independent verified STOP switch failed");
+    Check(!stopBypass->CancellationRequested(), "old STOP still cancelled a newly admitted flow with its gate disabled");
+    Check(!RobotOperationLease::TryAcquire(firstDriver, QStringLiteral("duplicate")),
+        "verified STOP switch bypassed exclusive lease");
+    RobotOperationLease::RequestCancellation(firstDriver);
+    Check(stopBypass->CancellationRequested(), "verified STOP switch bypassed current flow cancellation");
+    Check(!RobotOperationLease::MarkMotionStarted(firstDriver), "current STOP failed to block motion with its admission gate off");
+    RobotOperationLease::ConfirmCancellationHandled(firstDriver);
+    stopBypass.reset();
+    RobotOperationLease::SetSystemInterlockForTest(Gate::VerifiedStop, true);
+
     RobotOperationLease::SetNewOperationsAllowed(
         false,
         QStringLiteral("test-session-gate"));
@@ -268,6 +384,7 @@ int main()
     Check(!RobotOperationLease::AnyActive(), "parallel leases did not unregister");
 
     RobotDriverAdaptor emptyEndpointA;
+    RobotOperationLease::SetSystemInterlockForTest(Gate::DriverEndpointIdentity, false);
     emptyEndpointA.m_nSocketPort = 8193;
     RobotDriverAdaptor emptyEndpointB;
     emptyEndpointB.m_nSocketPort = 8193;
@@ -294,6 +411,7 @@ int main()
         "invalid endpoints did not fall back to distinct pointer identities");
     invalidLeaseA.reset();
     invalidLeaseB.reset();
+    RobotOperationLease::SetSystemInterlockForTest(Gate::DriverEndpointIdentity, true);
 
     auto crossThread = RobotOperationLease::TryAcquire(firstDriver, QStringLiteral("cross-thread"));
     Check(static_cast<bool>(crossThread), "cross-thread setup acquire failed");

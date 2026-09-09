@@ -32,11 +32,15 @@ public:
         const QString& robotName,
         const QString& encoded,
         QString* error = nullptr);
-    static bool InvalidateIfNoPending(const QString& robotName, QString& error);
+    static bool InvalidateIfNoPending(
+        const QString& robotName,
+        QString& error,
+        bool enforcePending = true);
     static bool PersistentAdmissionBlocked(
         const QString& robotName,
         const QString& endpointIdentity,
-        QString* reason = nullptr);
+        QString* reason = nullptr,
+        bool requireEndpoint = true);
     // 专用 paused 恢复租约取得后调用：在同一存储锁内原子重读 marker + RecordV2，
     // 严格绑定 checkpoint/端点/程序/轨迹，避免确认页与实际恢复之间的 TOCTOU。
     static bool ReadPausedResumeBinding(
@@ -53,7 +57,8 @@ public:
         const WeldResumePlanner::CheckpointRecord& expected,
         RobotRecoverySafetyPolicy::RecoveryBindingMode mode,
         RobotRecoverySafetyPolicy::ExclusiveRecoveryBinding* binding,
-        QString* error = nullptr);
+        QString* error = nullptr,
+        bool enforceIdentity = true);
     static void ReleaseExclusiveRecoveryBinding(
         const QString& endpointIdentity,
         const QString& token);

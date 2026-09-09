@@ -4,6 +4,7 @@
 #include "CameraFrameCache.h"
 #include "ConfigDatabase.h"
 #include "HandEyeMatrixConfig.h"
+#include "MeasureThenWeldCapabilityPolicy.h"
 #include "MeasureThenWeldRuntimeConfig.h"
 #include "ConfigSection.h"
 #include "PointCloudExtractionProcessor.h"
@@ -178,9 +179,29 @@ bool RequireRobotCapabilities(
     return false;
 }
 
+bool RequireRobotCapabilityMask(
+    RobotDriverAdaptor* driver,
+    std::uint64_t requiredMask,
+    const QString& action,
+    QString& error)
+{
+    if (driver == nullptr)
+    {
+        error = action + QStringLiteral("失败：机器人驱动为空。");
+        return false;
+    }
+    if (driver->SupportsMask(requiredMask)) { return true; }
+    error = QStringLiteral("当前机器人品牌底层无法执行“%1”，缺少适配能力：%2；功能已限制。")
+        .arg(action, QString::fromUtf8(driver->MissingCapabilitiesText(requiredMask).c_str()));
+    driver->SetLastRobotError(ToUtf8StdString(error));
+    return false;
+}
+
 bool InvalidateStoredWeldResumeCheckpointImpl(const QString& robotName, QString& error)
 {
-    return WeldSafetyRecoveryStore::InvalidateIfNoPending(robotName, error);
+    const bool enforcePending = PointCloudProcessingConfig::RuntimeSystemInterlocks()
+        .IsEnabled(SystemInterlock::SafeRetreatPending);
+    return WeldSafetyRecoveryStore::InvalidateIfNoPending(robotName, error, enforcePending);
 }
 
 QString ComputeFileSha256ForResumeGate(const QString& filePath, QString& error)
@@ -203,7 +224,7 @@ QString ComputeFileSha256ForResumeGate(const QString& filePath, QString& error)
 
 constexpr auto POINT_CLOUD_QUALITY_GATE_FILE_NAME = "PreciseLaserPoint_QualityGate.json";
 constexpr auto POINT_CLOUD_QUALITY_ALGORITHM_REVISION =
-    "pcq-v5-20260730-configurable-validity";
+    "pcq-v6-20260903-sdkbase-input-binding";
 constexpr int POINT_CLOUD_QUALITY_SCHEMA_VERSION = 3;
 constexpr int POINT_CLOUD_PRODUCTION_CONTEXT_REVISION = 1;
 constexpr auto POINT_CLOUD_PROOF_SECURITY_MODULE = "PointCloudProofSecurity";
@@ -589,6 +610,10 @@ QJsonObject BuildPointCloudQualityThresholds(const PointCloudProcessingConfig::S
             : settings.fitSampleStepMm);
     thresholds.insert("minFinitePointCount", settings.validationMinFinitePointCount);
     thresholds.insert("minProjectedSpanMm", settings.validationMinProjectedSpanMm);
+    thresholds.insert("minSdkBaseCloudCoverageRatio",
+        settings.validationMinSdkBaseCloudCoverageRatio);
+    thresholds.insert("maxSdkBaseEndpointDeviationRatio",
+        settings.validationMaxSdkBaseEndpointDeviationRatio);
     thresholds.insert("minStationCoverageRatio", settings.validationMinStationCoverageRatio);
     thresholds.insert("minLongestContinuousRatio", settings.validationMinLongestContinuousRatio);
     thresholds.insert("maxRejectedRatio", settings.validationMaxRejectedRatio);
@@ -650,6 +675,10 @@ QJsonObject BuildPointCloudQualityThresholds(const PointCloudProcessingConfig::S
     if (!settings.validationCoverageEnabled)
     {
         thresholds.insert("coverageEnabled", false);
+    }
+    if (!settings.validationSdkBaseIntegrityEnabled)
+    {
+        thresholds.insert("sdkBaseIntegrityEnabled", false);
     }
     if (!settings.validationContinuityEnabled)
     {
@@ -743,6 +772,13 @@ QJsonObject PointCloudQualityMetricsToJson(
     metrics.insert("outputLengthMm", report.outputLengthMm);
     metrics.insert("outputLengthRatio", report.outputLengthRatio);
     metrics.insert("maxOutputStepMm", report.maxOutputStepMm);
+    metrics.insert("sdkBaseWeldPointCount", report.sdkBaseWeldPointCount);
+    metrics.insert("sdkBaseFullCloudProjectedSpanMm", report.sdkBaseFullCloudProjectedSpanMm);
+    metrics.insert("sdkBaseWeldProjectedSpanMm", report.sdkBaseWeldProjectedSpanMm);
+    metrics.insert("sdkBaseCloudCoverageRatio", report.sdkBaseCloudCoverageRatio);
+    metrics.insert("sdkBaseStartEndpointDeviationMm", report.sdkBaseStartEndpointDeviationMm);
+    metrics.insert("sdkBaseEndEndpointDeviationMm", report.sdkBaseEndEndpointDeviationMm);
+    metrics.insert("sdkBaseMaxEndpointDeviationRatio", report.sdkBaseMaxEndpointDeviationRatio);
     return metrics;
 }
 
@@ -2066,6 +2102,14 @@ bool IsFiniteCameraPoint(const Eigen::Vector3d& point)
         && std::isfinite(point.z());
 }
 
+Eigen::Vector3d BuildCameraLinePoint(const cv::Point3d& sourcePoint, bool mirrorZ)
+{
+    return Eigen::Vector3d(
+        sourcePoint.x,
+        sourcePoint.y,
+        mirrorZ ? -sourcePoint.z : sourcePoint.z);
+}
+
 bool ShouldSkipLaserCalc(const TimestampedCameraPoint& sample)
 {
     if (!IsFiniteCameraPoint(sample.point))
@@ -2906,11 +2950,12 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             return failed;
         }
         // 进程隔离调用 SDK：SDK(pcl_kdtree 多线程)崩溃时拦截为可报告错误、主程序不挂(防崩护栏)。
+        const Eigen::Vector3d scanDirection = BuildScanDirection(param);
         const PointCloudExtractionProcessor::ExtractionResult extraction =
             PointCloudExtractionProcessor::ExtractCorrugatedSheetIsolated(
                 fullCloudInput,
                 settings,
-                BuildScanDirection(param),
+                scanDirection,
                 useBaseWeldFit ? sdkBaseWeldOutputPath : QString(),
                 stopRequested);
         if (isCanceled())
@@ -2926,6 +2971,98 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                 appendLog(failed.error);
             }
             return failed;
+        }
+
+        PointCloudExtractionProcessor::SdkBaseWeldIntegrityResult sdkBaseIntegrity;
+        const bool auditOnly =
+            settings.validationPolicy == PointCloudProcessingConfig::ValidationPolicy::Audit;
+        const auto applySdkBaseIntegrityMetrics =
+            [&sdkBaseIntegrity, auditOnly](
+                RobotCalculation::MeasureThenWeldAnalysisResult::PointCloudQualityReport& report)
+            {
+                if (!sdkBaseIntegrity.evaluated)
+                {
+                    return;
+                }
+                report.evaluated = true;
+                report.auditOnly = auditOnly;
+                report.sdkBaseWeldPointCount = sdkBaseIntegrity.sdkBaseWeldPointCount;
+                report.sdkBaseFullCloudProjectedSpanMm =
+                    sdkBaseIntegrity.fullCloudProjectedSpanMm;
+                report.sdkBaseWeldProjectedSpanMm =
+                    sdkBaseIntegrity.sdkBaseWeldProjectedSpanMm;
+                report.sdkBaseCloudCoverageRatio = sdkBaseIntegrity.cloudCoverageRatio;
+                report.sdkBaseStartEndpointDeviationMm =
+                    sdkBaseIntegrity.startEndpointDeviationMm;
+                report.sdkBaseEndEndpointDeviationMm =
+                    sdkBaseIntegrity.endEndpointDeviationMm;
+                report.sdkBaseMaxEndpointDeviationRatio =
+                    sdkBaseIntegrity.maxEndpointDeviationRatio;
+                if (!sdkBaseIntegrity.passed
+                    && !report.failures.contains(sdkBaseIntegrity.error))
+                {
+                    report.failures.push_front(sdkBaseIntegrity.error);
+                }
+                report.passed = report.failures.isEmpty();
+            };
+
+        if (useBaseWeldFit && settings.validationSdkBaseIntegrityEnabled)
+        {
+            sdkBaseIntegrity = PointCloudExtractionProcessor::EvaluateSdkBaseWeldIntegrity(
+                fullCloudInput,
+                extraction.points,
+                scanDirection,
+                settings.validationMinSdkBaseCloudCoverageRatio,
+                settings.validationMaxSdkBaseEndpointDeviationRatio,
+                stopRequested);
+            if (sdkBaseIntegrity.canceled || isCanceled())
+            {
+                return canceledResult();
+            }
+            if (!sdkBaseIntegrity.passed)
+            {
+                if (auditOnly)
+                {
+                    if (appendLog)
+                    {
+                        appendLog(QStringLiteral("SDK基础焊道完整性审计不通过（审计模式记录但不拦截）：")
+                            + sdkBaseIntegrity.error);
+                    }
+                }
+                else
+                {
+                    RobotCalculation::MeasureThenWeldAnalysisResult failed;
+                    failed.error = sdkBaseIntegrity.error
+                        + QStringLiteral(" 已在SDKBase平滑、首尾截断、拟合和平台重算前停止。");
+                    failed.qualityReport.inputPointCount = fullCloudInput.size();
+                    failed.qualityReport.finitePointCount =
+                        sdkBaseIntegrity.fullCloudFinitePointCount;
+                    applySdkBaseIntegrityMetrics(failed.qualityReport);
+                    if (appendLog)
+                    {
+                        appendLog(failed.error);
+                    }
+                    return failed;
+                }
+            }
+            else if (appendLog)
+            {
+                appendLog(QString(
+                    "SDK基础焊道完整性门禁通过：完整点云参考跨度=%1 mm，SDKBase点数=%2、首末端跨度=%3 mm，"
+                    "实际覆盖率=%4%（门禁>=%5%），最大单侧端点偏差率=%6%（门禁<=%7%）。")
+                    .arg(sdkBaseIntegrity.fullCloudProjectedSpanMm, 0, 'f', 3)
+                    .arg(sdkBaseIntegrity.sdkBaseWeldPointCount)
+                    .arg(sdkBaseIntegrity.sdkBaseWeldProjectedSpanMm, 0, 'f', 3)
+                    .arg(sdkBaseIntegrity.cloudCoverageRatio * 100.0, 0, 'f', 2)
+                    .arg(settings.validationMinSdkBaseCloudCoverageRatio * 100.0, 0, 'f', 2)
+                    .arg(sdkBaseIntegrity.maxEndpointDeviationRatio * 100.0, 0, 'f', 2)
+                    .arg(settings.validationMaxSdkBaseEndpointDeviationRatio * 100.0, 0, 'f', 2));
+            }
+        }
+        else if (useBaseWeldFit && appendLog)
+        {
+            appendLog(QStringLiteral(
+                "SDK基础焊道完整性门禁已关闭：本次不比较SDKBase与完整点云扫描向覆盖范围。"));
         }
         // 已焊起点截断（开关控制）：SDK 检测到已焊段时，按焊接方向截掉焊道已焊部分只焊剩余段。
         PointCloudExtractionProcessor::ExtractionResult workingExtraction = extraction;
@@ -3005,6 +3142,7 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             analysis = PointCloudExtractionProcessor::BuildAnalysisResult(
                 workingExtraction, sdkDirectParams);
         }
+        applySdkBaseIntegrityMetrics(analysis.qualityReport);
         if (!analysis.ok)
         {
             if (appendLog)
@@ -6270,24 +6408,21 @@ T_ROBOT_COORS BuildScanSafeCoorsFromAnchor(
     return safe;
 }
 
-double PulseDeltaDeg(long currentPulse, long targetPulse, double pulseUnit)
-{
-    if (!std::isfinite(pulseUnit) || std::abs(pulseUnit) <= 1e-12)
-    {
-        return 0.0;
-    }
-    return std::abs(static_cast<double>(currentPulse - targetPulse) * pulseUnit);
-}
-
-double MaxWristDeltaDeg(
+bool TryMaxWristDeltaDeg(
     const T_ANGLE_PULSE& currentPulse,
     const T_ANGLE_PULSE& targetPulse,
-    const T_AXISUNIT& axisUnit)
+    const T_AXISUNIT& axisUnit,
+    double& maxDeltaDeg,
+    QString& error)
 {
-    const double r = PulseDeltaDeg(currentPulse.nRPulse, targetPulse.nRPulse, axisUnit.dRPulseUnit);
-    const double b = PulseDeltaDeg(currentPulse.nBPulse, targetPulse.nBPulse, axisUnit.dBPulseUnit);
-    const double t = PulseDeltaDeg(currentPulse.nTPulse, targetPulse.nTPulse, axisUnit.dTPulseUnit);
-    return std::max({ r, b, t });
+    std::string detail;
+    const bool valid = MeasureThenWeldCapabilityPolicy::TryMaxWristDeltaDeg(
+        { currentPulse.nRPulse, currentPulse.nBPulse, currentPulse.nTPulse },
+        { targetPulse.nRPulse, targetPulse.nBPulse, targetPulse.nTPulse },
+        { axisUnit.dRPulseUnit, axisUnit.dBPulseUnit, axisUnit.dTPulseUnit },
+        maxDeltaDeg, &detail);
+    error = QString::fromUtf8(detail.c_str());
+    return valid;
 }
 
 int NormalizeWeldSafeRetreatDirectionMode(int mode)
@@ -11329,17 +11464,31 @@ bool WaitRobotMotionDone(
 
 	(void)startTimeoutMs;
     const int done = pRobotDriver->CheckRobotDone(pollDelayMs, finishTimeoutMs);
+    const std::string completionError = done > 0
+        ? std::string()
+        : pRobotDriver->GetLastRobotError();
     if (appendLog)
     {
         appendLog(QString("运动结束：%1, CheckRobotDone=%2").arg(name).arg(done));
         if (done <= 0)
         {
             const QString detail = RobotMotionStatusText(pRobotDriver);
-            if (!detail.isEmpty())
+            const QString completionDetail = DecodeRobotMessageText(completionError).trimmed();
+            const QString combined = completionDetail.isEmpty() ? detail
+                : (detail.isEmpty() ? completionDetail
+                    : completionDetail + QStringLiteral("；") + detail);
+            if (!combined.isEmpty())
             {
-                appendLog(QString("运动异常：%1，%2").arg(name, detail));
+                appendLog(QString("运动异常：%1，%2").arg(name, combined));
             }
         }
+    }
+    if (done <= 0 && !completionError.empty())
+    {
+        // Status diagnostics perform additional read-only controller queries;
+        // preserve the completion command's original failure for the outer
+        // workflow dialog and persisted report.
+        pRobotDriver->SetLastRobotError(completionError);
     }
     return done > 0;
 }
@@ -11752,17 +11901,25 @@ bool MeasureThenWeldService::MovePulseAndWait(RobotDriverAdaptor* pRobotDriver, 
         appendLog(QString("开始运动：%1").arg(name));
     }
 
-	const bool moveOk = pRobotDriver->MoveJointPercent(
+    const bool moveOk = pRobotDriver->MoveJointPercent(
 		pulse, speed, pRobotDriver->ExternalAxleType());
     if (!moveOk)
     {
+        // Status polling is diagnostic only and may update LastRobotError.
+        // Preserve the command failure so the outer scan-cycle error reports
+        // the actual controller reply instead of a generic safe-pose failure.
+        const std::string commandError = pRobotDriver->GetLastRobotError();
         if (appendLog)
         {
-            const QString detail = RobotMotionStatusText(pRobotDriver);
+            const QString status = RobotMotionStatusText(pRobotDriver);
+            const QString commandDetail = DecodeRobotMessageText(commandError).trimmed();
+            const QString detail = commandDetail.isEmpty() ? status
+                : (status.isEmpty() ? commandDetail : commandDetail + QStringLiteral("；") + status);
             appendLog(detail.isEmpty()
                 ? QString("运动失败：%1").arg(name)
                 : QString("运动失败：%1，%2").arg(name, detail));
         }
+        if (!commandError.empty()) { pRobotDriver->SetLastRobotError(commandError); }
         return false;
     }
 
@@ -11825,8 +11982,11 @@ bool MeasureThenWeldService::MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, 
 	T_ROBOT_COORS current;
 	if (!pRobotDriver->TryGetCurrentPos(current))
 	{
+		const std::string commandError = pRobotDriver->GetLastRobotError();
+		const QString status = RobotMotionStatusText(pRobotDriver);
+		if (!commandError.empty()) { pRobotDriver->SetLastRobotError(commandError); }
 		const QString failure = QString("直线运动失败：%1，读取当前位置失败，%2")
-			.arg(name, RobotMotionStatusText(pRobotDriver));
+			.arg(name, status);
 		if (appendLog)
 		{
 			appendLog(failure);
@@ -11868,13 +12028,18 @@ bool MeasureThenWeldService::MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, 
 		coors, commandSpeed, pRobotDriver->ExternalAxleType());
     if (!moveOk)
     {
+        const std::string commandError = pRobotDriver->GetLastRobotError();
         if (appendLog)
         {
-            const QString detail = RobotMotionStatusText(pRobotDriver);
+            const QString status = RobotMotionStatusText(pRobotDriver);
+            const QString commandDetail = DecodeRobotMessageText(commandError).trimmed();
+            const QString detail = commandDetail.isEmpty() ? status
+                : (status.isEmpty() ? commandDetail : commandDetail + QStringLiteral("；") + status);
             appendLog(detail.isEmpty()
                 ? QString("直线运动失败：%1").arg(name)
                 : QString("直线运动失败：%1，%2").arg(name, detail));
         }
+        if (!commandError.empty()) { pRobotDriver->SetLastRobotError(commandError); }
         return false;
     }
 
@@ -11961,19 +12126,30 @@ bool MeasureThenWeldService::MoveScanStartSafeAndWait(
             .arg(param.nScanSafeXDirection >= 0 ? "X+" : "X-"));
     }
 
+    // A computed Cartesian route still needs a validated current joint reading.
+    // The adaptor must reject stale-session/raw diagnostic pulses even when no
+    // taught start reference is available for the optional delta comparison.
+    T_ANGLE_PULSE currentPulse;
+    if (!pRobotDriver->TryGetCurrentPulse(currentPulse))
+    {
+        if (appendLog)
+        {
+            appendLog("扫描安全位规划已拒绝：读取当前关节位置失败，"
+                + RobotMotionStatusText(pRobotDriver));
+        }
+        return false;
+    }
+    double maxWristDeltaDeg = 0.0;
+    QString wristError;
+    if (!TryMaxWristDeltaDeg(currentPulse, param.bHasStartPulse ? param.tStartPulse : currentPulse,
+        pRobotDriver->AxisUnit(), maxWristDeltaDeg, wristError))
+    {
+        pRobotDriver->SetLastRobotError(ToUtf8StdString(wristError));
+        if (appendLog) { appendLog(QStringLiteral("扫描安全位规划已拒绝：") + wristError); }
+        return false;
+    }
     if (param.bHasStartPulse)
     {
-        T_ANGLE_PULSE currentPulse;
-        if (!pRobotDriver->TryGetCurrentPulse(currentPulse))
-        {
-            if (appendLog)
-            {
-                appendLog("扫描安全位规划已拒绝：读取当前关节位置失败，"
-                    + RobotMotionStatusText(pRobotDriver));
-            }
-            return false;
-        }
-        const double maxWristDeltaDeg = MaxWristDeltaDeg(currentPulse, param.tStartPulse, pRobotDriver->AxisUnit());
         const double warnThresholdDeg = param.dScanSafeFlipWarnThresholdDeg > 0.0
             ? param.dScanSafeFlipWarnThresholdDeg
             : 90.0;
@@ -12148,17 +12324,28 @@ bool MeasureThenWeldService::RunScanCycle(
         return fail("扫描循环失败：机器人驱动为空。", false);
     }
     QString capabilityError;
-    if (!RequireRobotCapabilities(
+    const std::uint64_t scanMask = MeasureThenWeldCapabilityPolicy::ScanMask<RobotDriverCapability>(
+        param.bUseComputedScanSafe, scanTrajectory != nullptr);
+    if (!RequireRobotCapabilityMask(
         pRobotDriver,
-        { RobotDriverCapability::LinearMotion,
-          RobotDriverCapability::PassiveState,
-          RobotDriverCapability::VerifiedProgramCompletion,
-          RobotDriverCapability::VerifiedSafeAbort },
+        scanMask,
         QStringLiteral("先测后焊扫描流程"),
         capabilityError))
     {
         result.fatalFailure = true;
         return fail(capabilityError, false);
+    }
+    if (param.bUseComputedScanSafe)
+    {
+        const T_AXISUNIT& axisUnit = pRobotDriver->AxisUnit();
+        std::string wristError;
+        if (!MeasureThenWeldCapabilityPolicy::ValidateWristAxisUnits(
+            { axisUnit.dRPulseUnit, axisUnit.dBPulseUnit, axisUnit.dTPulseUnit }, &wristError))
+        {
+            result.fatalFailure = true;
+            pRobotDriver->SetLastRobotError(wristError);
+            return fail(QStringLiteral("扫描前置检查失败：") + QString::fromUtf8(wristError.c_str()), false);
+        }
     }
     if (cameraCache == nullptr)
     {
@@ -12168,17 +12355,6 @@ bool MeasureThenWeldService::RunScanCycle(
     // 非空指针即表示调用方要求执行该轨迹；空向量不得静默回退为普通终点 MOVL。
     if (scanTrajectory != nullptr)
     {
-		if (!RequireRobotCapabilities(
-			pRobotDriver,
-			{ RobotDriverCapability::ContinuousTrajectory,
-			  RobotDriverCapability::VerifiedProgramCompletion,
-			  RobotDriverCapability::VerifiedSafeAbort },
-			QStringLiteral("扫描变姿态连续轨迹"),
-			capabilityError))
-        {
-            result.fatalFailure = true;
-            return fail(capabilityError, false);
-        }
         if (scanTrajectory->size() < 2
             || scanTrajectory->size() > SCAN_POSE_VARIATION_MAX_POINTS)
         {
@@ -12298,6 +12474,15 @@ bool MeasureThenWeldService::RunScanCycle(
                 .arg(calibrationError, cameraSection),
             false);
     }
+    if (!ValidateControllerBoundHandEyeMatrix(
+        robotName, cameraSection, validatedCalibration, pRobotDriver, &calibrationError))
+    {
+        result.fatalFailure = true;
+        return fail(
+            QString("扫描前置检查失败：控制器导入手眼矩阵绑定失效：%1")
+                .arg(calibrationError),
+            false);
+    }
     if (appendLog)
     {
         appendLog(QString("扫描前置检查通过：手眼矩阵=%1 [%2]")
@@ -12355,7 +12540,13 @@ bool MeasureThenWeldService::RunScanCycle(
             }
             return false;
         }
-        return fail("扫描循环失败：未能到达扫描下枪安全位置。", true);
+        // Capture the underlying cause before fail() performs any stop/recovery
+        // queries, which may replace the driver's most recent error.
+        const QString robotError = DecodeRobotMessageText(pRobotDriver->GetLastRobotError()).trimmed();
+        const QString failure = robotError.isEmpty()
+            ? QStringLiteral("扫描循环失败：未能到达扫描下枪安全位置。")
+            : QStringLiteral("扫描循环失败：未能到达扫描下枪安全位置。\n机器人最近错误：%1").arg(robotError);
+        return fail(failure, true);
     }
     result.lastPhase = ScanCyclePhase::AtStartSafe;
 
@@ -12595,8 +12786,18 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     const double scanCommandSpeed = LinearCommandSpeedForRobot(pRobotDriver, param.dScanSpeed, 1.0);
     const QString scanCommandSpeedUnit = LinearCommandSpeedUnitText(pRobotDriver);
     const qint64 cameraTimeOffsetUs = static_cast<qint64>(std::llround(param.dCameraTimeOffsetMs * 1000.0));
+    const QString timestampRobotName = QString::fromStdString(pRobotDriver->RobotName());
+    const auto configuredScanTimestampSource =
+        MeasureThenWeldRuntimeConfig::LoadConfiguredScanTimestampSource(timestampRobotName);
+    const bool nativeRobotTimestampAvailable = pRobotDriver->Supports(RobotDriverCapability::RobotTimestamp);
+    // Freeze configuration and the actual connected driver's capability for
+    // this scan; another robot's settings never change this sampling epoch.
     const MeasureThenWeldRuntimeConfig::ScanTimestampSource scanTimestampSource =
-        MeasureThenWeldRuntimeConfig::LoadScanTimestampSource();
+        MeasureThenWeldRuntimeConfig::EffectiveScanTimestampSource(
+            MeasureThenWeldRuntimeConfig::LoadScanTimestampSource(timestampRobotName), nativeRobotTimestampAvailable);
+    // 每轮扫描冻结一次，避免后台处理期间切换设置导致同一批点云混用两种坐标。
+    const bool mirrorCameraLinePointZ =
+        MeasureThenWeldRuntimeConfig::LoadCameraLinePointMirrorZ();
     const bool useRobotTimestampForScan =
         scanTimestampSource != MeasureThenWeldRuntimeConfig::ScanTimestampSource::Pc;
     const QString scanTimestampSourceName = MeasureThenWeldRuntimeConfig::DisplayName(scanTimestampSource);
@@ -13135,9 +13336,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                                 break;
                             }
                             const cv::Point3d& sourcePoint = queuedFrame.frame.allResultPoint[static_cast<std::size_t>(linePointIndex)];
-                            // 相机底层保证 allResultPoint 与 targetPoint 使用相同设备 XYZ 坐标；
-                            // 业务层只消费统一坐标，禁止再按相机品牌修改符号。
-                            const Eigen::Vector3d cameraLinePoint(sourcePoint.x, sourcePoint.y, sourcePoint.z);
+                            // 相机底层先保证 allResultPoint 为 TargetDeviceXYZ；只有用户显式开启
+                            // 生产点云 Z 镜像时，才在手眼变换前反射 cameraLinePoint.z。
+                            const Eigen::Vector3d cameraLinePoint =
+                                BuildCameraLinePoint(sourcePoint, mirrorCameraLinePointZ);
                             constexpr double kZeroPointEps = 1e-9;
                             const bool isZeroPoint =
                                 std::abs(cameraLinePoint.x()) <= kZeroPointEps
@@ -13274,6 +13476,12 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
 
     if (appendLog)
     {
+        appendLog(QString("机器人=%1，扫描时间源配置=%2；本次连接原生RobotTimestamp能力=%3；有效时间源=%4（%5）。本轮冻结，PC时间不会标为robot_ms。")
+            .arg(timestampRobotName, MeasureThenWeldRuntimeConfig::DisplayName(configuredScanTimestampSource))
+            .arg(nativeRobotTimestampAvailable ? "有" : "无")
+            .arg(scanTimestampSourceName, scanTimestampFieldName));
+        appendLog(QString("生产完整点云 cameraLinePoint Z镜像=%1（设置已在本轮扫描开始时冻结；关闭=TargetDeviceXYZ原向，开启=Z取反）。")
+            .arg(mirrorCameraLinePointZ ? QStringLiteral("开启") : QStringLiteral("关闭")));
         appendLog(QString("开始扫描运动：相机帧由当前机器人专属缓存读取，相机读取帧率=%1 Hz（约 %2 ms/帧，来自相机参数 CameraReadFps，用于时间间隔统计），机器人位姿约 %3 ms 采样；扫描匹配时间轴=%4（%5），相机帧timestamp会在首帧处映射到该时间轴，并叠加相机时间补偿 %6 ms。点云转换使用 %7 个后台处理线程。配置扫描速度= %8 mm/min，下发速度= %9 %10")
             .arg(actualCameraReadFps, 0, 'f', 2)
             .arg(cameraReadIntervalMs)

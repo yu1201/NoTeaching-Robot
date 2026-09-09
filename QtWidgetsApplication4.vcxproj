@@ -73,6 +73,27 @@
     <Import Project="$(QtMsBuild)\Qt.props" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Label="CommercialLicense">
+    <LicenseChannel Condition="'$(LicenseChannel)' == '' and '$(ReleaseExeName)' == 'HK-Pathlynx-CORPLA.exe'">brand</LicenseChannel>
+    <LicenseChannel Condition="'$(LicenseChannel)' == ''">neutral</LicenseChannel>
+    <LicenseMode Condition="'$(LicenseMode)' == '' and '$(LicenseChannel)' == 'brand'">2</LicenseMode>
+    <LicenseMode Condition="'$(LicenseMode)' == ''">0</LicenseMode>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PreprocessorDefinitions>HK_LICENSE_MODE=$(LicenseMode);HK_LICENSE_CHANNEL=&quot;$(LicenseChannel)&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ForcedIncludeFiles Condition="'$(LicensePublicKeyHeader)' != ''">$(LicensePublicKeyHeader);%(ForcedIncludeFiles)</ForcedIncludeFiles>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>bcrypt.lib;crypt32.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <Target Name="ValidateCommercialLicenseBuild" BeforeTargets="ClCompile">
+    <Error Condition="'$(LicenseMode)' != '0' and '$(LicenseMode)' != '1' and '$(LicenseMode)' != '2'" Text="LicenseMode must be 0 (Off), 1 (Audit), or 2 (Enforce)." />
+    <Error Condition="'$(LicenseChannel)' != 'neutral' and '$(LicenseChannel)' != 'brand'" Text="LicenseChannel must be neutral or brand." />
+    <Error Condition="'$(LicensePublicKeyHeader)' != '' and !Exists('$(LicensePublicKeyHeader)')" Text="License public key header does not exist: $(LicensePublicKeyHeader)" />
+    <Error Condition="'$(LicenseMode)' != '0' and '$(LicensePublicKeyHeader)' == ''" Text="An enabled license build requires an explicit LicensePublicKeyHeader exported by the license server." />
+  </Target>
   <PropertyGroup Label="OpenCascade">
     <OcctRoot Condition="'$(OcctRoot)' == ''">$(VcpkgRoot)\installed\x64-windows</OcctRoot>
     <OcctIncludeDir>$(OcctRoot)\include\opencascade</OcctIncludeDir>
@@ -142,6 +163,8 @@
     </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\LicenseManager.cpp" />
+    <ClCompile Include="src\LicenseDialog.cpp" />
     <ClCompile Include="src\AppPaths.cpp" />
     <ClCompile Include="src\CliHelp.cpp" />
     <ClCompile Include="src\BrandingConfig.cpp" />
@@ -155,6 +178,8 @@
     <ClCompile Include="src\FTPClient.cpp" />
     <ClCompile Include="src\FANUCRobotDriver.cpp" />
     <ClCompile Include="src\InovanceRobotDriver.cpp" />
+    <ClCompile Include="src\InovanceCalibration.cpp" />
+    <ClCompile Include="src\RobotCalibrationDialog.cpp" />
     <ClCompile Include="src\FanucTpContentIdentity.cpp" />
     <ClCompile Include="src\FunctionTestDialog.cpp" />
     <ClCompile Include="portable\LaserFramePoint3DFilter\LaserFramePoint3DFilter.cpp">
@@ -221,6 +246,8 @@
     <ClCompile Include="src\RobotLog.cpp" />
     <ClCompile Include="src\SKJCameraControlClient.cpp" />
     <ClCompile Include="src\RobotDriverAdaptor.cpp" />
+    <ClCompile Include="src\RobotCalibrationService.cpp" />
+    <ClCompile Include="src\RobotKinematicsModel.cpp" />
     <ClCompile Include="src\RobotFtpFileTransfer.cpp" />
     <ClCompile Include="src\RobotDriverRegistry.cpp" />
     <ClCompile Include="src\RobotMessage.cpp" />
@@ -251,6 +278,9 @@
     <ClCompile Include="src\main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\LicenseBuildConfig.h" />
+    <ClInclude Include="include\LicenseManager.h" />
+    <ClInclude Include="include\LicenseDialog.h" />
     <ClInclude Include="include\AppPaths.h" />
     <ClInclude Include="include\CliHelp.h" />
     <ClInclude Include="include\BrandingConfig.h" />
@@ -265,6 +295,11 @@
     <ClInclude Include="include\ContralUnit.h" />
     <ClInclude Include="include\FANUCRobotDriver.h" />
     <ClInclude Include="include\InovanceRobotDriver.h" />
+    <ClInclude Include="include\InovanceWeldCalibration.h" />
+    <ClInclude Include="include\RobotCalibrationDialog.h" />
+    <ClInclude Include="include\RobotCalibrationService.h" />
+    <ClInclude Include="include\RobotCalibrationTypes.h" />
+    <ClInclude Include="include\RobotKinematicsModel.h" />
     <ClInclude Include="include\FanucTpContentIdentity.h" />
     <ClInclude Include="include\FunctionTestDialog.h" />
     <QtMoc Include="include\groove\clientudpformsensorworker.h" />
@@ -314,12 +349,27 @@
     <ClInclude Include="include\RobotCalculation.h" />
     <ClInclude Include="include\RobotDataHelper.h" />
     <ClInclude Include="include\RobotDriverAdaptor.h" />
+    <ClInclude Include="include\RobotAdaptorAcceptanceStore.h" />
+    <ClInclude Include="include\RobotAdaptorAcceptanceLayout.h" />
+    <ClInclude Include="include\RobotAdaptorAcceptancePlan.h" />
+    <ClInclude Include="include\RobotAxisUnitValidation.h" />
+    <ClInclude Include="include\RobotAcceptanceJointMotion.h" />
+    <ClInclude Include="include\InovanceKinematicsSession.h" />
+    <ClInclude Include="include\MeasureThenWeldCapabilityPolicy.h" />
+    <ClInclude Include="include\RobotAcceptanceAlarmPreparation.h" />
+    <ClInclude Include="include\RobotRegisterRoundTrip.h" />
+    <ClInclude Include="include\RobotModePreparationTest.h" />
+    <ClInclude Include="include\RobotModePreparationStore.h" />
+    <ClInclude Include="include\InovanceModeSequence.h" />
+    <ClInclude Include="include\InovanceConnectionPreparation.h" />
+    <ClInclude Include="include\InovanceUserLogin.h" />
     <ClInclude Include="include\RobotFtpFileTransfer.h" />
     <ClInclude Include="include\RobotDriverRegistry.h" />
     <ClInclude Include="include\RobotLog.h" />
     <ClInclude Include="include\SKJCameraControlClient.h" />
     <ClInclude Include="include\RobotMessage.h" />
     <ClInclude Include="include\RobotOperationLease.h" />
+    <ClInclude Include="include\SystemInterlockPolicy.h" />
     <ClInclude Include="include\RobotRecoverySafetyPolicy.h" />
     <ClInclude Include="include\ApplicationInstanceGuard.h" />
     <ClInclude Include="include\RobotPoseTransform.h" />

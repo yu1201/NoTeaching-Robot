@@ -29,6 +29,8 @@ def main() -> int:
     udp = read("src/groove/clientudpformsensorworker.cpp")
     skj = read("src/groove/scancameraskjworker.cpp")
     service = read("src/MeasureThenWeldService.cpp")
+    runtime_config = read("include/MeasureThenWeldRuntimeConfig.h")
+    app = read("src/QtWidgetsApplication4.cpp")
 
     for token in (
         "CameraNativePointCloudConvention",
@@ -68,13 +70,49 @@ def main() -> int:
         "SKJ must not inherit the legacy TCP/UDP Z inversion",
     )
 
-    require(
-        "Eigen::Vector3d cameraLinePoint(sourcePoint.x, sourcePoint.y, sourcePoint.z)" in service,
-        "measure-then-weld must consume the canonical camera point without a brand-specific sign change",
-    )
+    for token in (
+        "BuildCameraLinePoint(const cv::Point3d& sourcePoint, bool mirrorZ)",
+        "mirrorZ ? -sourcePoint.z : sourcePoint.z",
+        "LoadCameraLinePointMirrorZ()",
+        "BuildCameraLinePoint(sourcePoint, mirrorCameraLinePointZ)",
+        "设置已在本轮扫描开始时冻结",
+    ):
+        require(token in service, f"explicit cameraLinePoint Z-mirror flow missing: {token}")
     require(
         "sourcePoint.y, -sourcePoint.z" not in service,
-        "legacy Z inversion leaked back into the business layer",
+        "unconditional legacy Z inversion leaked back into the business layer",
+    )
+    for token in (
+        'return QStringLiteral("CameraLinePointMirrorZ")',
+        "LoadCameraLinePointMirrorZ()",
+        "SaveCameraLinePointMirrorZ(bool enabled)",
+        "return false;",
+    ):
+        require(token in runtime_config, f"persistent Z-mirror setting missing: {token}")
+    for token in (
+        "预览Z镜像：关",
+        "流程Z镜像：关",
+        "SetCameraLinePointMirrorEnabled(",
+        "SetPreviewMirrorEnabled(",
+        "SetCameraLinePointMirrorHandler(",
+        "HasRunningMeasureThenWeldFlow()",
+        "cameraLinePoint.Z",
+        "bool mirrorCameraLinePointZ)",
+        "mirrorCameraLinePointZ ? -point.z : point.z",
+        "mirrorCameraLinePointZ ? -frame.targetPoint.z : frame.targetPoint.z",
+        "m_previewMirrorZEnabled",
+        "预览Z镜像已开启",
+        "流程Z镜像已开启",
+    ):
+        require(token in app, f"preview Z-mirror control missing: {token}")
+    require(
+        "toolbarLayout->addWidget(m_previewMirrorButton" in app
+        and "toolbarLayout->addWidget(m_cameraLinePointMirrorButton" in app,
+        "preview/flow mirror buttons must be owned by the top toolbar layout",
+    )
+    require(
+        "frame.targetX.at(index), frame.targetY.at(index)" not in app,
+        "preview still consumes the legacy always-inverted targetY display vector",
     )
     for token in (
         "if (!readyCameraFrame.allResultPoint.empty()",
@@ -91,7 +129,8 @@ def main() -> int:
 
     print(
         "PASS: legacy TCP/UDP normalize opposite Z in their transports, "
-        "SKJ preserves device XYZ, and scan business consumes only attested canonical clouds"
+        "SKJ preserves device XYZ, and an explicit default-off cameraLinePoint Z-mirror "
+        "setting is frozen per scan and exposed by the preview control"
     )
     return 0
 

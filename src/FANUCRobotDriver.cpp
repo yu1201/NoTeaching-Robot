@@ -1483,6 +1483,7 @@ RobotFileTransferProfile FANUCRobotCtrl::FileTransferProfile() const
 	profile.defaultRemoteDirectory = "/md";
 	profile.defaultLocalDirectory = "Job/FANUC";
 	profile.localFileFilters = { "*.ls", "*.tp", "*.kl", "*.pc", "*.var", "*.vr", "*.dt" };
+	profile.acceptanceProgramExtensions = { ".ls", ".tp" };
 	return profile;
 }
 
@@ -1559,6 +1560,24 @@ bool FANUCRobotCtrl::MoveLinearMmPerMin(
 		"MOVL",
 		1,
 		nativeConfiguration);
+}
+
+bool FANUCRobotCtrl::MoveCircularMmPerMin(
+	const T_ROBOT_COORS& via,
+	const T_ROBOT_COORS& target,
+	double speedMmPerMin,
+	int externalAxleType,
+	const int* viaConfiguration,
+	const int* targetConfiguration)
+{
+	(void)via;
+	(void)target;
+	(void)speedMmPerMin;
+	(void)externalAxleType;
+	(void)viaConfiguration;
+	(void)targetConfiguration;
+	SetLastRobotError("FANUC圆弧运动未声明能力：当前常驻服务尚无带中间点、目标点和完成见证的MOVC命令。");
+	return false;
 }
 
 bool FANUCRobotCtrl::MoveJointPercent(
@@ -1642,6 +1661,16 @@ RobotMotionStatus FANUCRobotCtrl::ReadMotionStatusPassive(long long* pRobotMs, l
 	return FanucNormalizedMotionStatus(
 		CheckDonePassive(pRobotMs, pPcRecvMs),
 		GetStateMonitorSourceText());
+}
+
+RobotControllerStatus FANUCRobotCtrl::ReadControllerStatus()
+{
+	RobotControllerStatus status;
+	status.connected = IsConnected();
+	status.motion = ReadMotionStatusPassive(nullptr, &status.pcRecvMs);
+	status.detail = "FANUC结构化控制器状态未声明能力：当前常驻服务尚未分别返回急停、伺服、故障码和控制许可。";
+	SetLastRobotError(status.detail);
+	return status;
 }
 
 bool FANUCRobotCtrl::ReserveTrajectory(
@@ -5593,6 +5622,17 @@ bool FANUCRobotCtrl::SetRealVar(int nIndex, double value, const char* cStrPreFix
 	const std::string prefix = cStrPreFix == nullptr ? "REAL" : cStrPreFix;
 	std::string response;
 	return FanucRequest(this, "SET_REAL:" + prefix + std::to_string(nIndex) + "," + GetStr("%.6f", value), response) && FanucIsOkResponse(response);
+}
+
+bool FANUCRobotCtrl::TryGetRealVar(
+	int nIndex, double& value, const char* cStrPreFix, int score)
+{
+	(void)nIndex;
+	(void)cStrPreFix;
+	(void)score;
+	value = 0.0;
+	SetLastRobotError("FANUC实数寄存器读取未声明能力：当前常驻服务只有SET_REAL，没有GET_REAL及写后回读契约。");
+	return false;
 }
 
 // ===================== 运动接口兼容层 =====================

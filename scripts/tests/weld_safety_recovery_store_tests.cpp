@@ -103,6 +103,9 @@ void RunSuite(const QString& root)
     Check(!WeldSafetyRecoveryStore::PersistentAdmissionBlocked(
         QStringLiteral("FreshRobot"), endpointA, &reason),
         "genuine first-use state should be admitted");
+    Check(!WeldSafetyRecoveryStore::PersistentAdmissionBlocked(
+        QStringLiteral("FreshRobot"), QString(), &reason, false),
+        "disabled endpoint gate still blocked first-use robot");
 
     qputenv("QTWIDGETSAPP4_TEST_CONFIG_CURSOR_ERROR", QByteArrayLiteral("1"));
     QString injectedReadback;
@@ -161,6 +164,16 @@ void RunSuite(const QString& root)
     Check(WeldSafetyRecoveryStore::BeginOrUpdatePending(
         pending.robotName, Encode(pending), &error),
         "could not seed endpoint-indexed pending state");
+    Check(WeldSafetyRecoveryStore::PersistentAdmissionBlocked(
+        pending.robotName, QString(), &reason, false),
+        "disabled endpoint gate also disabled pending recovery admission");
+    error.clear();
+    Check(WeldSafetyRecoveryStore::InvalidateIfNoPending(pending.robotName, error, false),
+        "disabled safe-retreat gate still blocked old-checkpoint invalidation caller");
+    bool preservedPending = false;
+    Check(WeldSafetyRecoveryStore::ReadPending(pending.robotName, preservedPending, &error)
+        && preservedPending,
+        "bypassing safe-retreat admission destroyed the recoverable pending record");
     reason.clear();
     Check(WeldSafetyRecoveryStore::PersistentAdmissionBlocked(
         QStringLiteral("RenamedRobotAlias"), endpointA, &reason),
@@ -218,6 +231,23 @@ void RunSuite(const QString& root)
     Check(!WeldSafetyRecoveryStore::RevalidateExclusiveRecoveryBinding(
         pausedBinding, &error),
         "STOP-period paused record replacement retained recovery binding");
+    RobotRecoverySafetyPolicy::ExclusiveRecoveryBinding independentA, independentB;
+    Check(WeldSafetyRecoveryStore::AcquireExclusiveRecoveryBinding(
+        paused.robotName, paused.robotEndpoint, paused,
+        RobotRecoverySafetyPolicy::RecoveryBindingMode::PausedResume, &independentA, &error, false)
+        && WeldSafetyRecoveryStore::AcquireExclusiveRecoveryBinding(
+        paused.robotName, paused.robotEndpoint, paused,
+        RobotRecoverySafetyPolicy::RecoveryBindingMode::PausedResume, &independentB, &error, false),
+        "independent recovery identity switch did not bypass exclusive snapshot check");
+    Check(WeldSafetyRecoveryStore::RevalidateExclusiveRecoveryBinding(independentA, &error),
+        "disabled recovery identity was unexpectedly revalidated");
+    WeldSafetyRecoveryStore::ReleaseExclusiveRecoveryBinding(independentA.endpointIdentity, independentA.token);
+    Check(WeldSafetyRecoveryStore::RevalidateExclusiveRecoveryBinding(independentB, &error),
+        "releasing one nonexclusive binding erased its peer");
+    Check(!WeldSafetyRecoveryStore::TransitionBoundRecordState(
+        &independentB, QStringLiteral("paused"), QStringLiteral("resuming"), &error),
+        "recovery identity switch bypassed basic atomic checkpoint transition");
+    WeldSafetyRecoveryStore::ReleaseExclusiveRecoveryBinding(independentB.endpointIdentity, independentB.token);
     Check(!WeldSafetyRecoveryStore::TransitionBoundRecordState(
         &pausedBinding, QStringLiteral("paused"), QStringLiteral("resuming"), &error),
         "STOP-period paused record replacement transitioned to resuming");

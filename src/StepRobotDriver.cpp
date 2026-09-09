@@ -231,33 +231,12 @@ namespace
 	{
 		if (pRobotMs != nullptr)
 		{
-			*pRobotMs = pcMs;
+			*pRobotMs = 0; // No native robot timestamp is available in this path.
 		}
 		if (pPcRecvMs != nullptr)
 		{
 			*pPcRecvMs = pcMs;
 		}
-	}
-
-	// 接口模式进程级缓存：-1=未加载 0=旧接口 1=时间戳接口。状态监控线程 50ms
-	// 周期调用本函数，逐次读配置库会引入每秒 20 次 SQLite 查询与采样抖动；
-	// 管理界面切换模式时经 InvalidateStepSdkInterfaceModeCache 作废重读。
-	std::atomic<int> g_stepSdkInterfaceModeCache{ -1 };
-
-	bool StepUseTimestampSdkInterface()
-	{
-#if STEP_SDK_HAS_TIMESTAMP
-		int cached = g_stepSdkInterfaceModeCache.load();
-		if (cached < 0)
-		{
-			cached = (MeasureThenWeldRuntimeConfig::LoadStepSdkInterfaceMode()
-				== MeasureThenWeldRuntimeConfig::StepSdkInterfaceMode::Timestamp) ? 1 : 0;
-			g_stepSdkInterfaceModeCache.store(cached);
-		}
-		return cached == 1;
-#else
-		return false;
-#endif
 	}
 
 	T_ROBOT_COORS StepRobotCartPosToCoors(const STEPROBOTSDK::RobotCartPos& cartPos)
@@ -2330,6 +2309,7 @@ STEPRobotCtrl::STEPRobotCtrl(std::string strUnitName, RobotLog* pLog)
 {
 	m_pSTEPRobotClient = new RobotComClient();
 	InitRobotDriver(strUnitName);
+	LoadStepSdkInterfaceModeSnapshot();
 	m_hMutex = CreateMutexA(NULL, FALSE, "Mutex");
 	//InitSocket(m_sSocketIP.c_str(), m_nSocketPort);
 }
@@ -2390,7 +2370,8 @@ bool STEPRobotCtrl::Disconnect()
 std::uint64_t STEPRobotCtrl::DriverCapabilities() const
 {
 	return RobotDriverCapabilityBit(RobotDriverCapability::PassiveState)
-		| RobotDriverCapabilityBit(RobotDriverCapability::RobotTimestamp)
+		| (StepUseTimestampSdkInterface() && m_nTimestampAxisLatch.load() == 1
+			? RobotDriverCapabilityBit(RobotDriverCapability::RobotTimestamp) : 0ULL)
 		| RobotDriverCapabilityBit(RobotDriverCapability::LinearMotion)
 		| RobotDriverCapabilityBit(RobotDriverCapability::JointMotion)
 		| RobotDriverCapabilityBit(RobotDriverCapability::ContinuousTrajectory)
@@ -2414,7 +2395,8 @@ std::uint64_t STEPRobotCtrl::DriverCapabilities() const
 		| RobotDriverCapabilityBit(RobotDriverCapability::NativeProgramExecution)
 		| RobotDriverCapabilityBit(RobotDriverCapability::FtpFileTransfer)
 		| RobotDriverCapabilityBit(RobotDriverCapability::HandEyeMatrixRead)
-		| RobotDriverCapabilityBit(RobotDriverCapability::HandEyeSupportProgramInstall);
+		| RobotDriverCapabilityBit(RobotDriverCapability::HandEyeSupportProgramInstall)
+		| RobotDriverCapabilityBit(RobotDriverCapability::RealRegister);
 }
 
 RobotFileTransferProfile STEPRobotCtrl::FileTransferProfile() const
@@ -2430,6 +2412,7 @@ RobotFileTransferProfile STEPRobotCtrl::FileTransferProfile() const
 		m_sStepProjectName.empty() ? kStepDynamicJobProjectName : m_sStepProjectName);
 	profile.defaultLocalDirectory = "Job/STEP";
 	profile.localFileFilters = { "*.srp", "*.srd", "*.sr" };
+	profile.acceptanceProgramExtensions = { ".srp" };
 	return profile;
 }
 
@@ -2499,6 +2482,24 @@ bool STEPRobotCtrl::MoveLinearMmPerMin(
 		nativeConfiguration);
 }
 
+bool STEPRobotCtrl::MoveCircularMmPerMin(
+	const T_ROBOT_COORS& via,
+	const T_ROBOT_COORS& target,
+	double speedMmPerMin,
+	int externalAxleType,
+	const int* viaConfiguration,
+	const int* targetConfiguration)
+{
+	(void)via;
+	(void)target;
+	(void)speedMmPerMin;
+	(void)externalAxleType;
+	(void)viaConfiguration;
+	(void)targetConfiguration;
+	SetLastRobotError("STEP圆弧运动未声明能力：当前适配层底层尚未证明单次MOVC的中间点、目标点和完成见证契约。");
+	return false;
+}
+
 bool STEPRobotCtrl::MoveJointPercent(
 	const T_ANGLE_PULSE& target,
 	double speedPercent,
@@ -2552,6 +2553,16 @@ RobotMotionStatus STEPRobotCtrl::ReadMotionStatusPassive(long long* pRobotMs, lo
 	return StepNormalizedMotionStatus(
 		CheckDonePassive(pRobotMs, pPcRecvMs),
 		GetStateMonitorSourceText());
+}
+
+RobotControllerStatus STEPRobotCtrl::ReadControllerStatus()
+{
+	RobotControllerStatus status;
+	status.connected = IsConnected();
+	status.motion = ReadMotionStatusPassive(nullptr, &status.pcRecvMs);
+	status.detail = "STEP结构化控制器状态未声明能力：当前SDK接入尚未分离证明急停、系统故障码和控制许可字段。";
+	SetLastRobotError(status.detail);
+	return status;
 }
 
 bool STEPRobotCtrl::ReserveTrajectory(
@@ -2781,7 +2792,14 @@ bool STEPRobotCtrl::ShutdownBeforeDisconnect()
 
 void STEPRobotCtrl::ReloadRuntimeConfiguration()
 {
-	InvalidateStepSdkInterfaceModeCache();
+	std::lock_guard<std::recursive_mutex> sdkLock(m_sdkCommandMutex);
+	if (m_bSocketConnected.load())
+	{
+		if (m_pRobotLog != nullptr)
+		{ m_pRobotLog->write(LogColor::DEFAULT, "STEP运行配置已保存；接口模式固定于本连接，重连后按本机器人配置生效，不在扫描中切换。"); }
+		return;
+	}
+	LoadStepSdkInterfaceModeSnapshot();
 }
 
 bool STEPRobotCtrl::PrepareNativeProgramUpload()
@@ -3471,6 +3489,7 @@ void STEPRobotCtrl::EnsureConnectionForMonitor()
 
 bool STEPRobotCtrl::InitSocket(const char* ip, unsigned short Port, bool ifRecord)
 {
+	std::lock_guard<std::recursive_mutex> sdkLock(m_sdkCommandMutex);
 	ClearLastRobotError();
 	// Copy before SDK use: callers commonly pass m_sSocketIP.c_str(), and assigning
 	// that aliased pointer back into the same std::string is not a safe update path.
@@ -3488,6 +3507,7 @@ bool STEPRobotCtrl::InitSocket(const char* ip, unsigned short Port, bool ifRecor
 			return false;
 		}
 	}
+	LoadStepSdkInterfaceModeSnapshot();
 	m_bSocketConnected = true;
 	if (!connectedIp.empty())
 	{
@@ -3504,9 +3524,20 @@ bool STEPRobotCtrl::InitSocket(const char* ip, unsigned short Port, bool ifRecor
 	return true;
 }
 
-void STEPRobotCtrl::InvalidateStepSdkInterfaceModeCache()
+void STEPRobotCtrl::LoadStepSdkInterfaceModeSnapshot()
 {
-	g_stepSdkInterfaceModeCache.store(-1);
+#if STEP_SDK_HAS_TIMESTAMP
+	m_stepUseTimestampSdkInterface.store(
+		MeasureThenWeldRuntimeConfig::LoadStepSdkInterfaceMode(QString::fromStdString(RobotName()))
+			== MeasureThenWeldRuntimeConfig::StepSdkInterfaceMode::Timestamp);
+#else
+	m_stepUseTimestampSdkInterface.store(false);
+#endif
+}
+
+bool STEPRobotCtrl::StepUseTimestampSdkInterface() const
+{
+	return m_stepUseTimestampSdkInterface.load();
 }
 
 bool STEPRobotCtrl::CloseSocket()
@@ -3601,7 +3632,9 @@ std::string STEPRobotCtrl::GetStateMonitorSourceText() const
 {
 #if STEP_SDK_HAS_TIMESTAMP
 	return StepUseTimestampSdkInterface()
-		? "STEP SDK新版getTimestamp()(位姿+robot_ms)，脉冲=getAxisPos，完成状态=getProgramState"
+		? (m_nTimestampAxisLatch.load() == 1
+			? "STEP SDK新版getTimestamp()(位姿+原生robot_ms)，脉冲=getAxisPos，完成状态=getProgramState"
+			: "STEP SDK新版getTimestamp()，原生时间戳尚未确认或本连接已回退PC；有效时间字段=pc_recv_ms")
 		: "STEP SDK旧版接口getCartPosWorld/getAxisPos/getProgramState，时间轴=PC接收时间";
 #else
 	return "STEP SDK旧版库构建getCartPosWorld/getAxisPos/getProgramState，时间轴=PC接收时间";
@@ -3683,6 +3716,7 @@ bool STEPRobotCtrl::TryGetCurrentPos(T_ROBOT_COORS& pos)
 
 T_ROBOT_COORS STEPRobotCtrl::GetCurrentPosPassive(long long* pRobotMs, long long* pPcRecvMs)
 {
+	std::lock_guard<std::recursive_mutex> sdkLock(m_sdkCommandMutex);
 	if (m_pSTEPRobotClient == nullptr)
 	{
 		if (pRobotMs != nullptr) *pRobotMs = 0;
@@ -3778,7 +3812,7 @@ T_ROBOT_COORS STEPRobotCtrl::GetCurrentPosPassive(long long* pRobotMs, long long
 	}
 	else
 	{
-		robotMs = pcRecvMs;
+		robotMs = 0; // PC fallback is represented only by pc_recv_ms.
 	}
 
 	if (pRobotMs != nullptr)
@@ -5075,6 +5109,7 @@ bool STEPRobotCtrl::AbortCurrentProgram()
 					m_sSocketIP.c_str(), m_nSocketPort, GetErrorText(initRet), initRet));
 				return false;
 			}
+			LoadStepSdkInterfaceModeSnapshot();
 			m_bSocketConnected.store(true);
 			m_nTimestampAxisLatch.store(0);
 			m_lastValidRobotMs.store(0);
@@ -5215,6 +5250,7 @@ bool STEPRobotCtrl::AbortPersistedProgramForRecovery(const std::string& expected
 					m_sSocketIP.c_str(), m_nSocketPort, GetErrorText(initRet), initRet));
 				return false;
 			}
+			LoadStepSdkInterfaceModeSnapshot();
 			m_bSocketConnected.store(true);
 			m_nTimestampAxisLatch.store(0);
 			m_lastValidRobotMs.store(0);
@@ -6560,6 +6596,11 @@ bool STEPRobotCtrl::SetIntVar(const char* name, int value, int score)
 
 bool STEPRobotCtrl::SetRealVar(int nIndex, double value, const char* cStrPreFix, int score)
 {
+	if (cStrPreFix == nullptr || nIndex < 0 || !std::isfinite(value))
+	{
+		SetLastRobotError("STEP设置REAL变量失败：变量前缀为空、索引无效或值不是有限数。");
+		return false;
+	}
 	const std::string sVarName = GetStr("%s%d", cStrPreFix, nIndex);
 	const std::string sProjectName = GetUserProject();
 	const std::string sProgramName = StepGetProgramScopeName(this, score);
@@ -6569,6 +6610,49 @@ bool STEPRobotCtrl::SetRealVar(int nIndex, double value, const char* cStrPreFix,
 		showErrorMessage(nullptr, "设置REAL变量失败:%s,原因:%s", sVarName.c_str(), GetErrorText(nRet));
 		return false;
 	}
+	double verified = 0.0;
+	if (!TryGetRealVar(nIndex, verified, cStrPreFix, score)
+		|| std::abs(verified - value) > std::max(1e-9, std::abs(value) * 1e-9))
+	{
+		SetLastRobotError(GetStr(
+			"STEP设置REAL变量后回读不一致：%s，期望=%.12g，实际=%.12g",
+			sVarName.c_str(), value, verified));
+		return false;
+	}
+	ClearLastRobotError();
+	return true;
+}
+
+bool STEPRobotCtrl::TryGetRealVar(
+	int nIndex, double& value, const char* cStrPreFix, int score)
+{
+	value = 0.0;
+	if (cStrPreFix == nullptr || nIndex < 0)
+	{
+		SetLastRobotError("STEP读取REAL变量失败：变量前缀为空或索引无效。");
+		return false;
+	}
+	const std::string sVarName = GetStr("%s%d", cStrPreFix, nIndex);
+	const std::string sProjectName = GetUserProject();
+	const std::string sProgramName = StepGetProgramScopeName(this, score);
+	const int nRet = WithSdkCommand([&]() {
+		return m_pSTEPRobotClient->VariableRealReadCmd(
+			sProjectName, sProgramName, sVarName, value);
+	});
+	if (nRet != 0)
+	{
+		value = 0.0;
+		SetLastRobotError(GetStr("STEP读取REAL变量失败：%s，原因=%s",
+			sVarName.c_str(), GetErrorText(nRet)));
+		return false;
+	}
+	if (!std::isfinite(value))
+	{
+		value = 0.0;
+		SetLastRobotError("STEP读取REAL变量失败：控制器返回了非有限数。");
+		return false;
+	}
+	ClearLastRobotError();
 	return true;
 }
 

@@ -97,6 +97,9 @@ require(complete.index("WriteRecordLocked") < complete.index("WritePendingLocked
         "safe completion clears marker before verified RecordV2 write")
 require("写后回读不一致" in store,
         "shared recovery store does not verify database writes by readback")
+require("if (!enforcePending)" in store
+        and "PointCloudProcessingConfig::RuntimeSystemInterlocks" in service,
+        "disabled safe-retreat interlock does not reach old-checkpoint invalidation")
 require("GetPrivateProfileStringW" not in store
         and "ReadScopedSettingStatus" in store
         and "kMaxRecordUtf8Bytes = 64 * 1024" in store,

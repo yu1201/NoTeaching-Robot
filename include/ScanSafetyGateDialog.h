@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDialog>
+#include "SystemInterlockPolicy.h"
 
 #include <functional>
 
@@ -14,8 +15,9 @@ class QString;
 
 // 管理页中的流程与机器人运动安全门禁配置页。
 //
-// 点云、焊道和最终轨迹的有效性检查统一由“测量参数/有效性检测”页面负责。
-// 本页只控制流程身份、证明链和机器人运动前复核；各开关会在生产校验点实际生效。
+// 本页统一列出所有可配置的点云/焊道/最终轨迹有效性门禁以及
+// 流程身份、证明链和运动前复核门禁。数值门限仍在“测量参数/有效性检测”编辑。
+// 进程、会话、停机、租约和焊后恢复互锁均在本页独立控制。
 // 保存或载入安全默认值前必须通过 modifyGuard 的管理员身份复核。
 class ScanSafetyGateDialog : public QDialog
 {
@@ -33,15 +35,18 @@ protected:
 
 private:
     void BuildUi();
+    void BuildQualityGateTable();
     void BuildHardGateTable();
+    void BuildMandatoryGateTable();
     void ConnectChangeTracking();
     bool AuthorizeModification(const QString& actionName);
     void RestoreSafetyDefaults();
     void Save();
     void UpdateSummary();
+    void UpdateMandatoryGateStatus();
     void UpdateChangeWarning();
     void SetDirty(bool dirty);
-    bool HasDisabledCoreSafetyGateUi() const;
+    bool HasDisabledConfigurableGateUi() const;
     QString DisabledGateDescription() const;
 
     std::function<bool()> m_modifyGuard;
@@ -53,6 +58,20 @@ private:
     QLabel* m_policySummaryLabel = nullptr;
     QLabel* m_proofSummaryLabel = nullptr;
     QLabel* m_changeWarningLabel = nullptr;
+
+    QCheckBox* m_coverageGateCheck = nullptr;
+    QCheckBox* m_sdkBaseIntegrityGateCheck = nullptr;
+    QCheckBox* m_continuityGateCheck = nullptr;
+    QCheckBox* m_denoiseRatioGateCheck = nullptr;
+    QCheckBox* m_residualGateCheck = nullptr;
+    QCheckBox* m_keyPointGateCheck = nullptr;
+    QCheckBox* m_outputGateCheck = nullptr;
+    QCheckBox* m_segmentHardLimitsGateCheck = nullptr;
+    QCheckBox* m_finalTrajectoryStepGateCheck = nullptr;
+    QCheckBox* m_finalLengthBindingGateCheck = nullptr;
+    QCheckBox* m_finalTopologyBindingGateCheck = nullptr;
+    QCheckBox* m_finalSourceBindingGateCheck = nullptr;
+    QCheckBox* m_finalSemanticIntegrityGateCheck = nullptr;
 
     QCheckBox* m_proofIntegrityGateCheck = nullptr;
     QCheckBox* m_productionPurposeGateCheck = nullptr;
@@ -66,8 +85,11 @@ private:
     QCheckBox* m_authorizedPoseIdentityGateCheck = nullptr;
     QCheckBox* m_trajectoryStructureGateCheck = nullptr;
     QCheckBox* m_motionPrecheckGateCheck = nullptr;
+    std::array<QCheckBox*, SystemInterlockCount> m_mandatoryGateChecks{};
 
+    QTableWidget* m_qualityGateTable = nullptr;
     QTableWidget* m_hardGateTable = nullptr;
+    QTableWidget* m_mandatoryGateTable = nullptr;
     QPushButton* m_reloadButton = nullptr;
     QPushButton* m_restoreDefaultsButton = nullptr;
     QPushButton* m_saveButton = nullptr;

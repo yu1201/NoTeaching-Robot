@@ -2943,6 +2943,12 @@ bool ModelWeldingFlowDialog::ReadCurrentRuntimeIdentity(
         error = QStringLiteral("手眼参数未达到运动使用条件：%1").arg(error);
         return false;
     }
+    if (!ValidateControllerBoundHandEyeMatrix(
+        robotName, cameraSection, firstHandEye, driver, &error))
+    {
+        error = QStringLiteral("控制器导入手眼矩阵绑定失效：%1").arg(error);
+        return false;
+    }
     const QString firstHandEyeSha256 =
         ModelWeldingWorkflow::ComputeHandEyeSha256(firstHandEye);
 

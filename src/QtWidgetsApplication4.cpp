@@ -17,11 +17,14 @@
 #include "ModelAlignmentDialog.h"
 #include "VirtualWeldTestDialog.h"
 #include "MeasureThenWeldDialog.h"
+#include "MeasureThenWeldCapabilityPolicy.h"
 #include "MeasureThenWeldRuntimeConfig.h"
 #include "MeasureThenWeldService.h"
 #include "WeldSafetyRecoveryStore.h"
 #include "OnlineServicesConfig.h"
 #include "OnlineServicesDialog.h"
+#include "LicenseManager.h"
+#include <QScopedValueRollback>
 #include "OnlineServicesLoginDialog.h"
 #include "ConfigSection.h"
 #include "PointCloudProcessingConfig.h"
@@ -36,6 +39,7 @@
 #include "RobotMessage.h"
 #include "RobotMotionTimeoutPolicy.h"
 #include "RobotOperationLease.h"
+#include "RobotCalibrationDialog.h"
 #include "SKJCameraControlClient.h"
 #include "TouchKeyboardManager.h"
 #include "WindowStyleHelper.h"
@@ -87,6 +91,9 @@
 #include <QLineF>
 #include <QEasingCurve>
 #include <QIntValidator>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QAction>
 #include <QCheckBox>
 #include <QClipboard>
@@ -2517,7 +2524,7 @@ namespace
 			rootLayout->addWidget(titleLabel);
 
 			QLabel* hintLabel = new QLabel(
-				"这里维护控制单元、机器人型号、IP、端口和 FTP 参数。机器人型号直接决定模型焊接流程使用哪套原始总装与碰撞简模；未配置或资源无效时该流程会禁用。保存后建议重新加载控制单元，正在运行流程时不要重载。",
+				"这里维护控制单元、机器人型号、通信和时间戳模式。时间轴按机器人保存，下次扫描生效；STEP接口模式保存并重载后生效。正在运行流程时禁止保存或重载。",
 				pageWidget);
 			hintLabel->setWordWrap(true);
 			hintLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);
@@ -2593,6 +2600,21 @@ namespace
 			m_ftpUserEdit = new QLineEdit(editGroup);
 			m_ftpPasswordEdit = new QLineEdit(editGroup);
 			m_stepProjectEdit = new QLineEdit(editGroup);
+			m_scanTimestampSourceCombo = new QComboBox(editGroup);
+			m_scanTimestampSourceCombo->setObjectName("ControlUnitScanTimestampSource");
+			m_scanTimestampSourceCombo->addItem("机器人原生时间戳", "robot");
+			m_scanTimestampSourceCombo->addItem("PC接收时间（steady）", "pc");
+			m_scanTimestampSourceCombo->setMinimumWidth(260);
+			m_scanTimestampSourceCombo->setToolTip("只作用于当前控制单元；每轮扫描开始时冻结时间轴，不受其他机器人设置影响。无原生时间戳的品牌固定使用PC接收时间。");
+			m_stepSdkInterfaceModeCombo = new QComboBox(editGroup);
+			m_stepSdkInterfaceModeCombo->setObjectName("ControlUnitStepSdkInterfaceMode");
+			m_stepSdkInterfaceModeCombo->addItem("新版时间戳接口", "timestamp");
+			m_stepSdkInterfaceModeCombo->addItem("旧版SDK接口（PC时间）", "legacy");
+			m_stepSdkInterfaceModeCombo->setMinimumWidth(260);
+			m_stepSdkInterfaceModeCombo->setToolTip("按STEP控制单元独立保存。保存并重载或重新连接后生效；不会在扫描过程中更换SDK接口。");
+			m_timestampHint = new QLabel(editGroup);
+			m_timestampHint->setWordWrap(true);
+			m_timestampHint->setMaximumWidth(380);
 
 			m_socketIpEdit->setMinimumWidth(228);
 			m_ftpIpEdit->setMinimumWidth(228);
@@ -2632,6 +2654,9 @@ namespace
 			form->addRow("FTP用户", m_ftpUserEdit);
 			form->addRow("FTP密码", m_ftpPasswordEdit);
 			form->addRow("STEP工程名", m_stepProjectEdit);
+			form->addRow("扫描时间戳模式", m_scanTimestampSourceCombo);
+			form->addRow("STEP状态接口", m_stepSdkInterfaceModeCombo);
+			form->addRow("时间轴说明", m_timestampHint);
 			editLayout->addLayout(form);
 
 			QHBoxLayout* editButtons = new QHBoxLayout();
@@ -2660,6 +2685,8 @@ namespace
 			rootLayout->addWidget(splitter, 1);
 
 			connect(m_unitTable, &QTableWidget::itemSelectionChanged, this, [this]() { SyncEditorFromSelection(); });
+			connect(m_stepSdkInterfaceModeCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+				this, [this]() { ApplyEditorRobotTypeUi(); });
 			connect(newBtn, &QPushButton::clicked, this, [this]() { PrepareNewUnit(false); });
 			connect(copyBtn, &QPushButton::clicked, this, [this]() { PrepareNewUnit(true); });
 			connect(deleteBtn, &QPushButton::clicked, this, [this]() { DeleteSelectedUnit(); });
@@ -2750,10 +2777,22 @@ namespace
 			QString ftpUser;
 			QString ftpPassword;
 			QString stepProjectName;
+			QString scanTimestampSource = "robot";
+			QString stepSdkInterfaceMode = "timestamp";
 			bool enabled = true;
 			QString workpieceType = kWorkpieceCorrugatedPlate;
 			bool cameraParamReady = true;
 			bool handEyeReady = true;
+		};
+
+		struct ConfigEditBlock
+		{
+			RobotOperationLease::NewOperationBlockToken token =
+				RobotOperationLease::AddNewOperationsBlock(QStringLiteral("正在保存机器人控制单元配置"));
+			~ConfigEditBlock() { RobotOperationLease::RemoveNewOperationsBlock(token); }
+			ConfigEditBlock() = default;
+			ConfigEditBlock(const ConfigEditBlock&) = delete;
+			ConfigEditBlock& operator=(const ConfigEditBlock&) = delete;
 		};
 
 		struct FtpCredential
@@ -2940,6 +2979,8 @@ namespace
 			};
 			QMap<QString, QString> baseParam = {
 				{ "RobotType", QString::number(robotType) },
+				{ "ScanTimestampSource", setup->supportsRobotTimestamp ? QStringLiteral("robot") : QStringLiteral("pc") },
+				{ "StepSdkInterfaceMode", QStringLiteral("timestamp") },
 				{ "SocketPort", QString::number(setup->defaultSocketPort) },
 				{ "FTPIP", QString::fromUtf8(setup->defaultFtpHost) },
 				{ "FTPPort", QString::number(setup->defaultFtpPort) },
@@ -2956,8 +2997,9 @@ namespace
 			}
 			if (robotType == ROBOT_TYPE_INOVANCE)
 			{
-				baseParam.insert("ToolNo", QStringLiteral("0"));
-				baseParam.insert("WobjNo", QStringLiteral("0"));
+				// 现场汇川标定及原生JOB约定：Tool[1] + Wobj[1]。
+				baseParam.insert("ToolNo", QString::number(kApplicationGunToolNumber));
+				baseParam.insert("WobjNo", QStringLiteral("1"));
 				baseParam.insert("MaxBufferedCommands", QStringLiteral("8"));
 				baseParam.insert("ForceControlPermit", QStringLiteral("0"));
 				baseParam.insert("ApiUserLevel", QStringLiteral("0"));
@@ -3127,6 +3169,24 @@ namespace
 				QMap<QString, QString> merged = existing.value(sectionIt.key());
 				const QMap<QString, QString> before = merged;
 				MergeMissingConfigValues(merged, sectionIt.value());
+				// Revision 1 的早期汇川模板曾错误写入 ToolNo=0、WobjNo=0。
+				// 只迁移这两个已知错误值，不覆盖现场显式配置的其他编号。
+				if (robotType == ROBOT_TYPE_INOVANCE
+					&& sectionIt.key().compare(QStringLiteral("BaseParam"), Qt::CaseInsensitive) == 0)
+				{
+					for (auto valueIt = merged.begin(); valueIt != merged.end(); ++valueIt)
+					{
+						const bool legacyTool = valueIt.key().compare(
+							QStringLiteral("ToolNo"), Qt::CaseInsensitive) == 0;
+						const bool legacyWobj = valueIt.key().compare(
+							QStringLiteral("WobjNo"), Qt::CaseInsensitive) == 0;
+						if ((legacyTool || legacyWobj)
+							&& valueIt.value().trimmed() == QStringLiteral("0"))
+						{
+							valueIt.value() = QStringLiteral("1");
+						}
+					}
+				}
 				if (merged != before)
 				{
 					replacements.insert(sectionIt.key(), merged);
@@ -3317,6 +3377,47 @@ namespace
 				units.push_back(unit);
 			}
 
+			// ControlUnits is the runtime inventory and intentionally contains only
+			// enabled units.  The management page must also recover disabled units
+			// from their retained robot-scoped configuration; otherwise unchecking
+			// "enabled" makes a fully configured unit disappear from this page.
+			QStringList configuredUnitNames;
+			if (!ConfigDatabase::TryListScopedSettingIds(
+					QStringLiteral("robot"),
+					QStringLiteral("RobotPara/BaseParam"),
+					&configuredUnitNames))
+			{
+				if (error != nullptr && error->isEmpty())
+				{
+					*error = "读取已停用控制单元列表失败：robot/RobotPara/BaseParam";
+				}
+				return units;
+			}
+			for (const QString& configuredUnitName : configuredUnitNames)
+			{
+				const QString unitName = configuredUnitName.trimmed();
+				const QString lookupName = unitName.toLower();
+				if (unitName.isEmpty() || unitRowByName.contains(lookupName))
+				{
+					continue;
+				}
+
+				UnitConfig unit;
+				unit.unitNo = -1;
+				unit.unitName = unitName;
+				LoadRobotPara(unit);
+				// A unit absent from the runtime inventory is fail-closed even if an
+				// interrupted earlier save left SetupStatus/Enabled=1 behind.
+				unit.enabled = false;
+				if (unit.chineseName.trimmed().isEmpty())
+				{
+					unit.chineseName = unit.customName.trimmed().isEmpty()
+						? unit.unitName : unit.customName;
+				}
+				unitRowByName.insert(lookupName, units.size());
+				units.push_back(unit);
+			}
+
 			return units;
 		}
 
@@ -3332,8 +3433,22 @@ namespace
 				return;
 			}
 			robotIni.SetSectionName("BaseParam");
+			const QString scopedChineseName = ReadConfigString(robotIni, "ChineseName");
+			if (unit.chineseName.trimmed().isEmpty() && !scopedChineseName.trimmed().isEmpty())
+			{
+				unit.chineseName = scopedChineseName;
+			}
 			unit.customName = ReadConfigString(robotIni, "CustomName");
+			if (unit.chineseName.trimmed().isEmpty())
+			{
+				unit.chineseName = unit.customName.trimmed().isEmpty()
+					? unit.unitName : unit.customName;
+			}
 			unit.robotType = ReadConfigInt(robotIni, "RobotType", unit.robotType);
+			unit.scanTimestampSource = MeasureThenWeldRuntimeConfig::ToStorageString(
+				MeasureThenWeldRuntimeConfig::LoadScanTimestampSource(unit.unitName));
+			unit.stepSdkInterfaceMode = MeasureThenWeldRuntimeConfig::ToStorageString(
+				MeasureThenWeldRuntimeConfig::LoadStepSdkInterfaceMode(unit.unitName));
 			const RobotDriverSetupProfile* setup =
 				RobotDriverRegistry::SetupProfile(unit.robotType);
 			const FtpCredential defaultFtpCredential =
@@ -3531,6 +3646,10 @@ namespace
 			m_ftpUserEdit->setText(unit.ftpUser);
 			m_ftpPasswordEdit->setText(unit.ftpPassword);
 			m_stepProjectEdit->setText(unit.stepProjectName);
+			m_stepSdkInterfaceModeCombo->setCurrentIndex(
+				qMax(0, m_stepSdkInterfaceModeCombo->findData(unit.stepSdkInterfaceMode)));
+			m_scanTimestampSourceCombo->setCurrentIndex(
+				qMax(0, m_scanTimestampSourceCombo->findData(unit.scanTimestampSource)));
 			m_lastEditorSocketIpForFtp = unit.socketIP;
 			ApplyEditorRobotTypeUi();
 		}
@@ -3540,6 +3659,18 @@ namespace
 			const int robotType = m_robotTypeCombo != nullptr
 				? m_robotTypeCombo->currentData().toInt() : -1;
 			const RobotDriverSetupProfile* setup = RobotDriverRegistry::SetupProfile(robotType);
+			const bool usesStepInterface = setup != nullptr && setup->usesStepTimestampInterface;
+			const bool nativeTimestampAvailable = setup != nullptr && setup->supportsRobotTimestamp
+				&& (!usesStepInterface || m_stepSdkInterfaceModeCombo->currentData().toString() != "legacy");
+			SetFormRowVisible(m_editorForm, m_stepSdkInterfaceModeCombo, usesStepInterface);
+			m_scanTimestampSourceCombo->setEnabled(nativeTimestampAvailable);
+			if (!nativeTimestampAvailable)
+			{
+				m_scanTimestampSourceCombo->setCurrentIndex(m_scanTimestampSourceCombo->findData("pc"));
+			}
+			m_timestampHint->setText(nativeTimestampAvailable
+				? QStringLiteral("该单元可选择原生时间戳或PC接收时间；实际接口无原生时间戳时使用PC时间并记录原因。保存后下次扫描生效。")
+				: QStringLiteral("当前品牌或SDK接口没有原生时间戳，固定使用PC接收steady时间。相机仍按现有统计时间对齐和时间补偿处理。"));
 			SetFormRowVisible(m_editorForm, m_monitorPortEdit,
 				setup != nullptr && setup->usesMonitorPort);
 			SetFormRowVisible(m_editorForm, m_stepProjectEdit,
@@ -3551,7 +3682,7 @@ namespace
 			SetFormRowVisible(m_editorForm, m_ftpPasswordEdit, usesFtp);
 			m_robotTypeCombo->setToolTip(setup != nullptr
 				? (robotType == ROBOT_TYPE_INOVANCE
-					? QStringLiteral("汇川已登记2222远程以太网、FTP、R/B寄存器和同工程原生JOB执行；上位机生成HK_WELD_JOB.pro，控制器JOB负责运动、起收弧与反馈超时。只有数据库WeldJob现场IO/DA映射完整时才开放实际焊接；原生JOB不支持暂停续行，手眼辅助仍未验证。")
+					? QStringLiteral("汇川已登记2222远程以太网、FTP、R/B/D寄存器、MOVL/MOVJ/MOVC、伺服上下电、结构化控制器状态和同工程原生JOB执行；上位机生成HK_WELD_JOB.pro，控制器使用ArcData[0]、WeldOn/WeldSet/WeldOff及已验证的正弦WeaveData[0]语法完成焊接。WeldJob IO/DA映射仅作为可选额外关弧见证；ArcTrackData文件格式、原生JOB暂停续行和手眼辅助仍需现场验证。")
 					: QStringLiteral("该类型已登记品牌底层。"))
 				: QStringLiteral("该类型未安装品牌底层，不能保存或重载；请选择已登记类型。"));
 		}
@@ -3610,6 +3741,12 @@ namespace
 			if (!RunNewUnitWizard(unit, copySelected))
 			{
 				AppendLog("已取消新建控制单元向导。");
+				return;
+			}
+			const ConfigEditBlock configEditBlock;
+			if (RobotOperationLease::AnyActive())
+			{
+				QMessageBox::warning(this, "控制单元管理", "机器人任务正在运行，请安全结束后再保存新控制单元。");
 				return;
 			}
 
@@ -4338,6 +4475,8 @@ namespace
 			unit.cameraParamReady = m_cameraReadyCheck != nullptr && m_cameraReadyCheck->isChecked();
 			unit.handEyeReady = m_handEyeReadyCheck != nullptr && m_handEyeReadyCheck->isChecked();
 			unit.robotType = m_robotTypeCombo->currentData().toInt();
+			unit.scanTimestampSource = m_scanTimestampSourceCombo->currentData().toString();
+			unit.stepSdkInterfaceMode = m_stepSdkInterfaceModeCombo->currentData().toString();
 			if (!RobotDriverRegistry::IsRegistered(unit.robotType))
 			{
 				error = QStringLiteral(
@@ -4439,6 +4578,14 @@ namespace
 
 		bool SaveCurrent(bool reloadAfterSave)
 		{
+			const ConfigEditBlock configEditBlock;
+			if (RobotOperationLease::AnyActive())
+			{
+				QMessageBox::warning(this, "控制单元管理",
+					QString("机器人任务正在运行：%1。请安全结束后再保存时间轴或连接参数。")
+					.arg(RobotOperationLease::ActiveSummary()));
+				return false;
+			}
 			UnitConfig edited;
 			QString error;
 			if (!CollectEditor(edited, error))
@@ -4480,6 +4627,8 @@ namespace
 			RefreshTable();
 			SelectUnit(edited.unitName);
 			AppendLog(QString("已保存 %1 的控制单元和机器人参数。").arg(edited.unitName));
+			AppendLog(QString("时间戳模式=%1；STEP接口=%2。时间轴下次扫描生效，STEP接口需要重载或重新连接。")
+				.arg(edited.scanTimestampSource, edited.stepSdkInterfaceMode));
 			if (reloadAfterSave)
 			{
 				ReloadControlUnits();
@@ -4753,6 +4902,14 @@ namespace
 
 		bool WriteRobotPara(const UnitConfig& unit, bool isNew, QString& error) const
 		{
+			// The wizard can save a provisional unit before its final submission.
+			// Keep the same exclusion here as in SaveCurrent/PrepareNewUnit.
+			const ConfigEditBlock configEditBlock;
+			if (RobotOperationLease::AnyActive())
+			{
+				error = "机器人任务正在运行，禁止写入控制单元参数。";
+				return false;
+			}
 			bool robotTypeChanged = false;
 			if (!EnsureRobotParameters(unit, &robotTypeChanged, error))
 			{
@@ -4776,9 +4933,18 @@ namespace
 			ini.SetSectionName("BaseParam");
 			bool ok = true;
 			ok = ok && WriteConfigString(ini, "RobotName", unit.unitName);
+			ok = ok && WriteConfigString(ini, "ChineseName", unit.chineseName);
 			ok = ok && WriteConfigString(ini, "CustomName", unit.customName);
 			ok = ok && WriteConfigInt(ini, "RobotType", unit.robotType);
 			ok = ok && WriteConfigString(ini, "RobotModelId", unit.robotModelId);
+			const RobotDriverSetupProfile* timestampSetup = RobotDriverRegistry::SetupProfile(unit.robotType);
+			const bool nativeTimestampAllowed = timestampSetup != nullptr && timestampSetup->supportsRobotTimestamp
+				&& (!timestampSetup->usesStepTimestampInterface || unit.stepSdkInterfaceMode != "legacy");
+			ok = ok && ConfigDatabase::WriteScopedSettings(location.scopeType, location.scopeId,
+				location.module + QStringLiteral("/BaseParam"), QMap<QString, QString>{
+					{ "ScanTimestampSource", nativeTimestampAllowed ? unit.scanTimestampSource : QStringLiteral("pc") },
+					{ "StepSdkInterfaceMode", unit.stepSdkInterfaceMode }
+				});
 			ok = ok && WriteConfigString(ini, "SocketIP", unit.socketIP);
 			ok = ok && WriteConfigInt(ini, "SocketPort", unit.socketPort);
 			if (unit.monitorPort > 0)
@@ -4816,6 +4982,12 @@ namespace
 
 		void ReloadControlUnits()
 		{
+			const ConfigEditBlock configEditBlock;
+			if (RobotOperationLease::AnyActive())
+			{
+				QMessageBox::warning(this, "控制单元管理", "机器人任务正在运行，禁止重载控制单元；请安全结束后重试。");
+				return;
+			}
 			if (m_reloadCallback)
 			{
 				m_reloadCallback();
@@ -4849,6 +5021,9 @@ namespace
 		QLineEdit* m_ftpUserEdit = nullptr;
 		QLineEdit* m_ftpPasswordEdit = nullptr;
 		QLineEdit* m_stepProjectEdit = nullptr;
+		QComboBox* m_scanTimestampSourceCombo = nullptr;
+		QComboBox* m_stepSdkInterfaceModeCombo = nullptr;
+		QLabel* m_timestampHint = nullptr;
 		QFormLayout* m_editorForm = nullptr;
 		QString m_lastEditorSocketIpForFtp;
 		QPlainTextEdit* m_logText = nullptr;
@@ -5957,7 +6132,11 @@ namespace
 			return QSize(width(), height());
 		}
 
-		void SetFrame(const udpDataShow& frame, const QString& statusText, const ViewState& viewState)
+		void SetFrame(
+			const udpDataShow& frame,
+			const QString& statusText,
+			const ViewState& viewState,
+			bool mirrorCameraLinePointZ)
 		{
 			m_profilePoints.clear();
 			m_trendLines.clear();
@@ -5967,22 +6146,30 @@ namespace
 			m_statusText = statusText;
 			m_viewState = viewState;
 
-			const int pointCount = std::min(frame.XData.size(), frame.YData.size());
-			m_profilePoints.reserve(pointCount > 0 ? pointCount : static_cast<int>(frame.allResultPoint.size()));
-			for (int index = 0; index < pointCount; ++index)
+			// 预览优先从与生产 cameraLinePoint 同源的规范化三维点投影，
+			// 避免旧 XData/YData 的协议原生 Z 方向与业务层不一致。
+			m_profilePoints.reserve(static_cast<int>(frame.allResultPoint.size()));
+			for (const cv::Point3d& point : frame.allResultPoint)
 			{
-				const QPointF point(frame.XData.at(index), frame.YData.at(index));
-				if (IsFinitePoint(point))
+				const QPointF projectedPoint(
+					point.y,
+					mirrorCameraLinePointZ ? -point.z : point.z);
+				if (IsFinitePoint(projectedPoint))
 				{
-					m_profilePoints.push_back(point);
+					m_profilePoints.push_back(projectedPoint);
 				}
 			}
 
 			if (m_profilePoints.isEmpty())
 			{
-				for (const cv::Point3d& point : frame.allResultPoint)
+				const int pointCount = std::min(frame.XData.size(), frame.YData.size());
+				m_profilePoints.reserve(pointCount);
+				for (int index = 0; index < pointCount; ++index)
 				{
-					const QPointF projectedPoint(point.y, point.z);
+					const double sourceZ = frame.YData.at(index);
+					const QPointF projectedPoint(
+						frame.XData.at(index),
+						mirrorCameraLinePointZ ? -sourceZ : sourceZ);
 					if (IsFinitePoint(projectedPoint))
 					{
 						m_profilePoints.push_back(projectedPoint);
@@ -5994,32 +6181,29 @@ namespace
 			m_trendLines.reserve(trendPointCount / 2);
 			for (int index = 0; index + 1 < trendPointCount; index += 2)
 			{
-				const QPointF start(frame.fitLineX.at(index), frame.fitLineY.at(index));
-				const QPointF end(frame.fitLineX.at(index + 1), frame.fitLineY.at(index + 1));
+				const double startZ = frame.fitLineY.at(index);
+				const double endZ = frame.fitLineY.at(index + 1);
+				const QPointF start(
+					frame.fitLineX.at(index),
+					mirrorCameraLinePointZ ? -startZ : startZ);
+				const QPointF end(
+					frame.fitLineX.at(index + 1),
+					mirrorCameraLinePointZ ? -endZ : endZ);
 				if (IsFinitePoint(start) && IsFinitePoint(end) && QLineF(start, end).length() > 1.0e-6)
 				{
 					m_trendLines.push_back(QLineF(start, end));
 				}
 			}
 
-			for (int index = std::min(frame.targetX.size(), frame.targetY.size()) - 1; index >= 0; --index)
+			// 目标点与轮廓必须使用同一 Z 映射。旧 targetY 在生产者中固定取反，
+			// 因此这里直接使用规范化的 targetPoint，不再消费 targetX/targetY。
+			const QPointF targetPoint(
+				frame.targetPoint.y,
+				mirrorCameraLinePointZ ? -frame.targetPoint.z : frame.targetPoint.z);
+			if (IsFinitePoint(targetPoint))
 			{
-				const QPointF point(frame.targetX.at(index), frame.targetY.at(index));
-				if (IsFinitePoint(point))
-				{
-					m_targetPoint = point;
-					m_hasTargetPoint = true;
-					break;
-				}
-			}
-			if (!m_hasTargetPoint)
-			{
-				const QPointF point(frame.targetPoint.y, frame.targetPoint.z);
-				if (IsFinitePoint(point))
-				{
-					m_targetPoint = point;
-					m_hasTargetPoint = true;
-				}
+				m_targetPoint = targetPoint;
+				m_hasTargetPoint = true;
 			}
 
 			if (!m_viewState.hasBaseBounds)
@@ -6582,6 +6766,90 @@ namespace
 				"}");
 			toolbarLayout->addSpacing(ScalePixels(8));
 			toolbarLayout->addWidget(m_trendLineToggleButton, 0, Qt::AlignLeft);
+			toolbarLayout->addSpacing(ScalePixels(8));
+			m_previewMirrorButton = new QPushButton("预览Z镜像：关", this);
+			m_previewMirrorButton->setCheckable(true);
+			m_previewMirrorButton->setCursor(Qt::PointingHandCursor);
+			m_previewMirrorButton->setMinimumHeight(ScalePixels(34));
+			m_previewMirrorButton->setToolTip(
+				"仅翻转本窗口绿色轮廓、三段线和红色目标点的 Z 显示，\n"
+				"点击后立即生效；不影响扫描流程，不修改相机缓存原始帧。");
+			m_previewMirrorButton->setStyleSheet(
+				"QPushButton {"
+				"background:#182832;"
+				"color:#DDFBFF;"
+				"border:1px solid #35596D;"
+				"border-radius:6px;"
+				"padding:6px 14px;"
+				"font-size:15px;"
+				"}"
+				"QPushButton:hover {"
+				"background:#213949;"
+				"border-color:#5F9BB2;"
+				"}"
+				"QPushButton:checked {"
+				"background:#246A58;"
+				"border-color:#7DE8C0;"
+				"color:#FFFFFF;"
+				"}");
+			connect(m_previewMirrorButton, &QPushButton::clicked, this, [this](bool enabled)
+				{
+					SetPreviewMirrorEnabled(enabled);
+					UpdateCameraControlStatus(
+						enabled
+							? QStringLiteral("预览Z镜像已开启：当前轮廓、三段线和目标点已立即翻转，流程设置未改变。")
+							: QStringLiteral("预览Z镜像已关闭：当前显示已恢复 TargetDeviceXYZ 原向，流程设置未改变。"),
+						true);
+				});
+			toolbarLayout->addWidget(m_previewMirrorButton, 0, Qt::AlignLeft);
+			toolbarLayout->addSpacing(ScalePixels(8));
+			m_cameraLinePointMirrorButton = new QPushButton("流程Z镜像：关", this);
+			m_cameraLinePointMirrorButton->setCheckable(true);
+			m_cameraLinePointMirrorButton->setCursor(Qt::PointingHandCursor);
+			m_cameraLinePointMirrorButton->setMinimumHeight(ScalePixels(34));
+			m_cameraLinePointMirrorButton->setToolTip(
+				"仅控制先测后焊完整点云进入手眼变换前的 cameraLinePoint.Z：\n"
+				"关=保持 TargetDeviceXYZ 原向；开=Z取反。不影响预览，不修改相机缓存原始帧。\n"
+				"扫描流程运行期间禁止切换。");
+			m_cameraLinePointMirrorButton->setStyleSheet(
+				"QPushButton {"
+				"background:#182832;"
+				"color:#DDFBFF;"
+				"border:1px solid #35596D;"
+				"border-radius:6px;"
+				"padding:6px 18px;"
+				"font-size:15px;"
+				"}"
+				"QPushButton:hover {"
+				"background:#213949;"
+				"border-color:#5F9BB2;"
+				"}"
+				"QPushButton:checked {"
+				"background:#7A3B16;"
+				"border-color:#FFB86B;"
+				"color:#FFFFFF;"
+				"}");
+			connect(m_cameraLinePointMirrorButton, &QPushButton::clicked, this, [this](bool enabled)
+				{
+					QString error;
+					if (!m_cameraLinePointMirrorChanged
+						|| !m_cameraLinePointMirrorChanged(enabled, &error))
+					{
+						SetCameraLinePointMirrorEnabled(!enabled);
+						UpdateCameraControlStatus(
+							error.trimmed().isEmpty()
+								? QStringLiteral("流程Z镜像设置未保存。") : error,
+							false);
+						return;
+					}
+					SetCameraLinePointMirrorEnabled(enabled);
+					UpdateCameraControlStatus(
+						enabled
+							? QStringLiteral("流程Z镜像已开启：下次扫描的 cameraLinePoint.Z 将取反，预览设置未改变。")
+							: QStringLiteral("流程Z镜像已关闭：下次扫描保持 TargetDeviceXYZ 原向，预览设置未改变。"),
+						true);
+				});
+			toolbarLayout->addWidget(m_cameraLinePointMirrorButton, 0, Qt::AlignLeft);
 			toolbarLayout->addStretch(1);
 			mainLayout->addLayout(toolbarLayout);
 
@@ -6840,6 +7108,39 @@ namespace
 		void SetFrameBufferCountHandler(std::function<void(int)> handler)
 		{
 			m_frameBufferCountChanged = std::move(handler);
+		}
+
+		void SetCameraLinePointMirrorHandler(std::function<bool(bool, QString*)> handler)
+		{
+			m_cameraLinePointMirrorChanged = std::move(handler);
+		}
+
+		void SetCameraLinePointMirrorEnabled(bool enabled)
+		{
+			if (m_cameraLinePointMirrorButton != nullptr)
+			{
+				const QSignalBlocker blocker(m_cameraLinePointMirrorButton);
+				m_cameraLinePointMirrorButton->setChecked(enabled);
+				UpdateCameraLinePointMirrorButtonText(enabled);
+			}
+		}
+
+		void SetPreviewMirrorEnabled(bool enabled)
+		{
+			if (m_previewMirrorButton != nullptr)
+			{
+				const QSignalBlocker blocker(m_previewMirrorButton);
+				m_previewMirrorButton->setChecked(enabled);
+				UpdatePreviewMirrorButtonText(enabled);
+			}
+			if (m_previewMirrorZEnabled == enabled)
+			{
+				return;
+			}
+			m_previewMirrorZEnabled = enabled;
+			// 镜像后原纵轴范围已不适用；两个页签均重新自适应，使点击结果立即可见。
+			ResetViewStates();
+			RefreshView(false, false);
 		}
 
 		void ShowCameraControlMessage(const QString& text, bool ok)
@@ -7105,6 +7406,24 @@ namespace
 			}
 		}
 
+		void UpdateCameraLinePointMirrorButtonText(bool enabled)
+		{
+			if (m_cameraLinePointMirrorButton != nullptr)
+			{
+				m_cameraLinePointMirrorButton->setText(
+					enabled ? QStringLiteral("流程Z镜像：开") : QStringLiteral("流程Z镜像：关"));
+			}
+		}
+
+		void UpdatePreviewMirrorButtonText(bool enabled)
+		{
+			if (m_previewMirrorButton != nullptr)
+			{
+				m_previewMirrorButton->setText(
+					enabled ? QStringLiteral("预览Z镜像：开") : QStringLiteral("预览Z镜像：关"));
+			}
+		}
+
 		void UpdateCameraControlStatus(const QString& text, bool ok)
 		{
 			if (m_cameraControlStatusLabel == nullptr)
@@ -7328,7 +7647,11 @@ namespace
 					? (showCachedFiltered ? "滤波后" : "滤波后计算中")
 					: "滤波前");
 			m_view->SetShowTrendLines(m_showTrendLines && showCachedFiltered);
-			m_view->SetFrame(frame, QString("%1  %2").arg(m_statusText, modeText), CurrentModeViewState());
+			m_view->SetFrame(
+				frame,
+				QString("%1  %2").arg(m_statusText, modeText),
+				CurrentModeViewState(),
+				m_previewMirrorZEnabled);
 			SaveCurrentViewState();
 		}
 
@@ -7344,6 +7667,9 @@ namespace
 		std::function<void(int)> m_frameBufferCountChanged;
 		QTabBar* m_previewModeTabs = nullptr;
 		QPushButton* m_trendLineToggleButton = nullptr;
+		QPushButton* m_previewMirrorButton = nullptr;
+		QPushButton* m_cameraLinePointMirrorButton = nullptr;
+		std::function<bool(bool, QString*)> m_cameraLinePointMirrorChanged;
 		QPushButton* m_refreshParamsButton = nullptr;
 		QPushButton* m_laserToggleButton = nullptr;
 		QLabel* m_cameraControlStatusLabel = nullptr;
@@ -7360,6 +7686,7 @@ namespace
 		bool m_hasFrame = false;
 		bool m_showFiltered = false;
 		bool m_showTrendLines = false;
+		bool m_previewMirrorZEnabled = false;
 		bool m_filteredFrameValid = false;
 		bool m_filterBuildRunning = false;
 		qint64 m_lastFilteredBuildMs = 0;
@@ -7641,7 +7968,16 @@ namespace
 			// 各阶段点云默认外观；完整工件大点云默认白色、小点不连线。
 			const FileSpec kWorkpiece{ "PreciseLaserPoint_WorkpieceCloud.txt", "完整工件点云", QColor(255, 255, 255), false, false, 1.2 };
 			const FileSpec kRaw{ "PreciseLaserPoint.txt", "原始精确点云", QColor(200, 225, 235), false, false, 2.0 };
-			const FileSpec kSdkBase{ "PreciseLaserPoint_SdkBase.txt", "SDK基础焊道", QColor(255, 170, 0), false, true, 0.0 };
+			const QString completedSdkBaseFileName = QStringLiteral("PreciseLaserPoint_SdkBase.txt");
+			const QString rawSdkBaseFileName = QDir(QStringLiteral("SdkPointCloud"))
+				.filePath(QStringLiteral("PreciseLaserPoint_SdkBaseWeld.txt"));
+			const bool useRawSdkBaseFallback =
+				!QFileInfo::exists(dir.filePath(completedSdkBaseFileName))
+				&& QFileInfo::exists(dir.filePath(rawSdkBaseFileName));
+			const FileSpec kSdkBase{
+				useRawSdkBaseFallback ? rawSdkBaseFileName : completedSdkBaseFileName,
+				useRawSdkBaseFallback ? "SDK基础焊道（门禁前原始输出）" : "SDK基础焊道",
+				QColor(255, 170, 0), false, true, 0.0 };
 			const FileSpec kPreserve{ "PreciseLaserPoint_PreservePath_2mm.txt", "保留路径(2mm)", QColor(0, 210, 210), false, true, 0.0 };
 			const FileSpec kClassified{ "PreciseLaserPoint_Classified.txt", "分类点云", QColor(0, 255, 80), true, true, 0.0 };
 			const FileSpec kWeldPose{ "PreciseLaserPoint_WeldPose_2mm_SeamComp.txt", "焊接姿态点云", QColor(255, 230, 90), false, true, 0.0 };
@@ -7666,6 +8002,38 @@ namespace
 				break;
 			}
 			AppendLog(QString("处理方法：%1").arg(PointCloudProcessingConfig::ModeDisplayName(mode)));
+			if (useRawSdkBaseFallback)
+			{
+				AppendLog(QString("正式方法基础焊道未生成，显示SDK门禁前原始输出：%1")
+					.arg(QDir::toNativeSeparators(rawSdkBaseFileName)));
+			}
+
+			QFile qualityGateFile(dir.filePath(QStringLiteral("PreciseLaserPoint_QualityGate.json")));
+			if (qualityGateFile.open(QIODevice::ReadOnly))
+			{
+				QJsonParseError parseError;
+				const QJsonDocument qualityGateDocument =
+					QJsonDocument::fromJson(qualityGateFile.readAll(), &parseError);
+				if (parseError.error == QJsonParseError::NoError && qualityGateDocument.isObject())
+				{
+					const QJsonObject qualityGate = qualityGateDocument.object();
+					if (qualityGate.value(QStringLiteral("state")).toString() == QStringLiteral("rejected"))
+					{
+						QStringList failures;
+						for (const QJsonValue& failure : qualityGate.value(QStringLiteral("failures")).toArray())
+						{
+							const QString text = failure.toString().trimmed();
+							if (!text.isEmpty())
+							{
+								failures.push_back(text);
+							}
+						}
+						AppendLog(failures.isEmpty()
+							? QStringLiteral("点云质量门禁已拒绝本次结果；请查看 PreciseLaserPoint_QualityGate.json。")
+							: QStringLiteral("点云质量门禁拒绝：") + failures.join(QStringLiteral("；")));
+					}
+				}
+			}
 
 			// 重活搬到后台线程：逐文件读盘+解析（带进度回报/取消），完成后回 UI 线程 SetLayers。
 			m_loading = true;
@@ -8807,8 +9175,6 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_pPermissionHintLabel(nullptr)
 	, m_pAccountManagementAction(nullptr)
 	, m_pManagementCameraReceiveModeBtn(nullptr)
-	, m_pScanTimestampSourceCombo(nullptr)
-	, m_pStepSdkInterfaceModeCombo(nullptr)
 	, m_pTouchKeyboardModeCombo(nullptr)
 	, m_pAuthTitleLabel(nullptr)
 	, m_pAuthHintLabel(nullptr)
@@ -9172,6 +9538,11 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	authButtonLayout->addStretch(1);
 	authCardLayout->addLayout(authButtonLayout);
 	authCardLayout->addWidget(m_pGuestLoginBtn, 0, Qt::AlignHCenter);
+	auto* authLicenseButton = new QPushButton(QStringLiteral("软件授权 / 激活"), authCard);
+	authLicenseButton->setFlat(true);
+	connect(authLicenseButton, &QPushButton::clicked, this, [this]()
+		{ LicenseManager::Instance().ShowDialog(this); });
+	authCardLayout->addWidget(authLicenseButton, 0, Qt::AlignHCenter);
 
 	m_pAccountLogText = new QPlainTextEdit(authCard);
 	m_pAccountLogText->setReadOnly(true);
@@ -9292,6 +9663,16 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	homeHintLabel->setWordWrap(true);
 	homeHintLabel->setStyleSheet("QLabel { color: #AFC8CE; font-size: 14px; }");
 	dashboardLayout->addWidget(homeHintLabel);
+	auto* licenseStatusLabel = new QLabel(m_pDashboardPage);
+	licenseStatusLabel->setObjectName(QStringLiteral("LicenseStatusLabel"));
+	licenseStatusLabel->setWordWrap(true);
+	licenseStatusLabel->setTextFormat(Qt::RichText);
+	licenseStatusLabel->setOpenExternalLinks(false);
+	licenseStatusLabel->setTextInteractionFlags(Qt::LinksAccessibleByMouse | Qt::LinksAccessibleByKeyboard);
+	licenseStatusLabel->setStyleSheet(QStringLiteral("QLabel { color: #E4BE77; font-size: 13px; }"));
+	connect(licenseStatusLabel, &QLabel::linkActivated, this, [this](const QString& target)
+		{ if (target == QStringLiteral("license")) LicenseManager::Instance().ShowDialog(this); });
+	dashboardLayout->addWidget(licenseStatusLabel);
 
 	auto makeLargeButton = [](const QString& text, QWidget* parent) -> QPushButton*
 		{
@@ -9417,13 +9798,8 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		{ RobotDriverCapability::PassiveState });
 	setRequiredCapabilities(quickTeachPositionBtn,
 		{ RobotDriverCapability::PassiveState });
-	setRequiredCapabilities(quickMeasureBtn,
-		{ RobotDriverCapability::JointMotion,
-		  RobotDriverCapability::LinearMotion,
-		  RobotDriverCapability::PassiveState,
-		  RobotDriverCapability::ContinuousTrajectory,
-		  RobotDriverCapability::VerifiedProgramCompletion,
-		  RobotDriverCapability::VerifiedSafeAbort });
+	quickMeasureBtn->setProperty("requiredRobotCapabilities", static_cast<qulonglong>(
+		MeasureThenWeldCapabilityPolicy::EntryMask<RobotDriverCapability>()));
 	setRequiredCapabilities(quickJogBtn,
 		{ RobotDriverCapability::JointMotion,
 		  RobotDriverCapability::LinearMotion,
@@ -9588,6 +9964,12 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 
 	addMenuAction(managementRobotMenu, createManagementAction("控制单元管理", [this]() { OpenControlUnitManagementDialog(); }));
 	addMenuAction(managementRobotMenu, createManagementAction("FTP Job 文件", [this]() { OpenFtpJobManagementDialog(); }));
+	addMenuAction(managementRobotMenu, createManagementAction("标定资产与模型优化", [this]() {
+		if (RequirePermission(kRoleEngineer, "标定资产与运动学模型优化"))
+		{
+			OpenRobotCalibrationDialog(m_pContralUnit, CurrentRobotUnitIndex(), m_pManagementPage);
+		}
+	}));
 
 	addMenuAction(managementProcessMenu, createManagementAction("工艺参数", [this, openInManagement]() { openInManagement([this]() { OpenWeldProcessDialog(); }); }));
 	addMenuAction(managementProcessMenu, createManagementAction("焊道补偿", [this, openInManagement]() { openInManagement([this]() { OpenWeldSeamCompDialog(); }); }));
@@ -9598,10 +9980,12 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	addMenuAction(managementCameraMenu, createManagementAction("相机参数", [this, openInManagement]() { openInManagement([this]() { OpenCameraParamDialog(); }); }));
 
 	addMenuAction(managementDebugMenu, createManagementAction("点动控制", [this, openInManagement]() { openInManagement([this]() { OpenRobotJogDialog(); }); }));
+	addMenuAction(managementDebugMenu, createManagementAction("机器人适配测试", [this, openInManagement]() { openInManagement([this]() { OpenRobotAdaptorAcceptanceDialog(); }); }));
 	addMenuAction(managementDebugMenu, createManagementAction("功能测试", [this, openInManagement]() { openInManagement([this]() { OpenFunctionTestDialog(); }); }));
 	addMenuAction(managementDebugMenu, createManagementAction("扫描变姿态精度测试", [this]() { OpenScanPoseVariationTestPage(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("结果打包压缩", [this]() { OpenResultArchiveDialog(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("在线服务", [this]() { OpenOnlineServicesDialog(); }));
+	addMenuAction(managementDebugMenu, createManagementAction("软件授权 / 激活", [this]() { LicenseManager::Instance().ShowDialog(this); }));
 	addMenuAction(managementDebugMenu, createManagementAction("工件模型", [this]() { OpenWorkpieceMeshPage(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("模型配准", [this]() { OpenModelAlignmentPage(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("虚拟焊道测试", [this]() { OpenVirtualWeldTestPage(); }));
@@ -9634,28 +10018,6 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	m_pManagementIconBgBtn->setMinimumHeight(34);
 	m_pManagementIconBgBtn->setMinimumWidth(150);
 	m_pManagementIconBgBtn->setStyleSheet("QPushButton { padding: 6px 14px; font-size: 14px; border-radius: 10px; }");
-	QLabel* scanTimestampLabel = new QLabel("扫描时间轴：", m_pManagementHomePage);
-	scanTimestampLabel->setStyleSheet("QLabel { color: #9ED8DB; padding-left: 8px; }");
-	m_pScanTimestampSourceCombo = new QComboBox(m_pManagementHomePage);
-	m_pScanTimestampSourceCombo->addItem(
-		MeasureThenWeldRuntimeConfig::DisplayName(MeasureThenWeldRuntimeConfig::ScanTimestampSource::Robot),
-		MeasureThenWeldRuntimeConfig::ToStorageString(MeasureThenWeldRuntimeConfig::ScanTimestampSource::Robot));
-	m_pScanTimestampSourceCombo->addItem(
-		MeasureThenWeldRuntimeConfig::DisplayName(MeasureThenWeldRuntimeConfig::ScanTimestampSource::Pc),
-		MeasureThenWeldRuntimeConfig::ToStorageString(MeasureThenWeldRuntimeConfig::ScanTimestampSource::Pc));
-	m_pScanTimestampSourceCombo->setFixedSize(150, 34);
-	m_pScanTimestampSourceCombo->setToolTip("先测后焊扫描匹配用的机器人位姿时间轴：机器人时间戳使用robot_ms；PC接收时间使用pc_recv_ms。");
-	QLabel* stepSdkInterfaceLabel = new QLabel("STEP接口：", m_pManagementHomePage);
-	stepSdkInterfaceLabel->setStyleSheet("QLabel { color: #9ED8DB; padding-left: 8px; }");
-	m_pStepSdkInterfaceModeCombo = new QComboBox(m_pManagementHomePage);
-	m_pStepSdkInterfaceModeCombo->addItem(
-		MeasureThenWeldRuntimeConfig::DisplayName(MeasureThenWeldRuntimeConfig::StepSdkInterfaceMode::Timestamp),
-		MeasureThenWeldRuntimeConfig::ToStorageString(MeasureThenWeldRuntimeConfig::StepSdkInterfaceMode::Timestamp));
-	m_pStepSdkInterfaceModeCombo->addItem(
-		MeasureThenWeldRuntimeConfig::DisplayName(MeasureThenWeldRuntimeConfig::StepSdkInterfaceMode::Legacy),
-		MeasureThenWeldRuntimeConfig::ToStorageString(MeasureThenWeldRuntimeConfig::StepSdkInterfaceMode::Legacy));
-	m_pStepSdkInterfaceModeCombo->setFixedSize(150, 34);
-	m_pStepSdkInterfaceModeCombo->setToolTip("新版使用STEP SDK getTimestamp()读取robot_ms；旧版绕开时间戳接口，使用getCartPosWorld()/getAxisPos()/getProgramState()并以PC接收时间兜底。");
 	QLabel* touchKeyboardLabel = new QLabel("虚拟键盘：", m_pManagementHomePage);
 	touchKeyboardLabel->setStyleSheet("QLabel { color: #9ED8DB; padding-left: 8px; }");
 	m_pTouchKeyboardModeCombo = new QComboBox(m_pManagementHomePage);
@@ -9670,10 +10032,6 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	managementTitleLayout->addStretch(1);
 	managementTitleLayout->addWidget(m_pManagementCameraReceiveModeBtn);
 	managementTitleLayout->addWidget(m_pManagementIconBgBtn);
-	managementTitleLayout->addWidget(scanTimestampLabel);
-	managementTitleLayout->addWidget(m_pScanTimestampSourceCombo);
-	managementTitleLayout->addWidget(stepSdkInterfaceLabel);
-	managementTitleLayout->addWidget(m_pStepSdkInterfaceModeCombo);
 	managementTitleLayout->addWidget(touchKeyboardLabel);
 	managementTitleLayout->addWidget(m_pTouchKeyboardModeCombo);
 	managementTitleLayout->addWidget(m_pManagementUserLabel);
@@ -9705,36 +10063,6 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	connect(m_pManagementIconBgBtn, &QPushButton::toggled, this, [this](bool checked)
 		{
 			SetDesktopIconWithBackground(checked);
-		});
-	connect(m_pScanTimestampSourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index)
-		{
-			if (m_pScanTimestampSourceCombo == nullptr || index < 0)
-			{
-				return;
-			}
-
-			MeasureThenWeldRuntimeConfig::SaveScanTimestampSource(
-				MeasureThenWeldRuntimeConfig::FromStorageString(m_pScanTimestampSourceCombo->itemData(index).toString()));
-		});
-	connect(m_pStepSdkInterfaceModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index)
-		{
-			if (m_pStepSdkInterfaceModeCombo == nullptr || index < 0)
-			{
-				return;
-			}
-
-			MeasureThenWeldRuntimeConfig::SaveStepSdkInterfaceMode(
-				MeasureThenWeldRuntimeConfig::StepSdkInterfaceModeFromStorageString(m_pStepSdkInterfaceModeCombo->itemData(index).toString()));
-			if (m_pContralUnit != nullptr)
-			{
-				for (const T_CONTRAL_UNIT& unitInfo : m_pContralUnit->m_vtContralUnitInfo)
-				{
-					if (RobotDriverAdaptor* driver = static_cast<RobotDriverAdaptor*>(unitInfo.pUnitDriver))
-					{
-						driver->ReloadRuntimeConfiguration();
-					}
-				}
-			}
 		});
 	connect(m_pTouchKeyboardModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index)
 		{
@@ -9885,6 +10213,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		OpenPrecisePointCloudProcessingPage();
 	});
 	addToolbarSeparator();
+	addCommandAction(debugMenu, "机器人适配测试", [this]() { OpenRobotAdaptorAcceptanceDialog(); });
 	addCommandAction(debugMenu, "功能测试", [this]() { OpenFunctionTestDialog(); });
 	addCommandAction(debugMenu, "结果打包压缩", [this]() { OpenResultArchiveDialog(); });
 	if (debugMenu != nullptr)
@@ -10132,12 +10461,18 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 			}
 		});
 	accountSessionTimer->start();
+	auto* licenseStateTimer = new QTimer(this);
+	licenseStateTimer->setInterval(250);
+	connect(licenseStateTimer, &QTimer::timeout, this, &QtWidgetsApplication4::RefreshLicenseState);
+	licenseStateTimer->start();
+	QPointer<QtWidgetsApplication4> licenseWindow(this);
+	LicenseManager::Instance().onPolicyChanged = [licenseWindow]()
+		{ if (licenseWindow) licenseWindow->RefreshLicenseState(); };
+	QTimer::singleShot(0, this, &QtWidgetsApplication4::RefreshLicenseState);
 
 	EnsureDefaultAdminAccount();
 	RefreshAccountUi();
 	LoadCameraReceiveMode();
-	RefreshScanTimestampSourceUi();
-	RefreshStepSdkInterfaceModeUi();
 	RefreshTouchKeyboardModeUi();
 	RefreshDesktopIconBgButtonUi();
 	if (BrandingConfig::IsActive())
@@ -10209,11 +10544,31 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 				pulse = snapshot.pulse;
 				done = snapshot.done;
 			}
-			const QString stateText = done == 0 ? "运行中" : (done == 1 ? "停止/完成" : QString("未知/异常(%1)").arg(done));
+			QString stateText;
+			if (hasSnapshot)
+			{
+				switch (snapshot.motion.state)
+				{
+				case RobotMotionState::Idle: stateText = "停止/空闲"; break;
+				case RobotMotionState::Starting: stateText = "启动中"; break;
+				case RobotMotionState::Running: stateText = "运动中"; break;
+				case RobotMotionState::Paused: stateText = "已暂停"; break;
+				case RobotMotionState::Completed: stateText = "停止/完成"; break;
+				case RobotMotionState::Interrupted: stateText = "运动已中断"; break;
+				case RobotMotionState::Faulted: stateText = "故障"; break;
+				default: stateText = QString("未知/异常(%1)").arg(snapshot.motion.rawCode); break;
+				}
+			}
+			else
+			{
+				stateText = done == 0 ? "运行中" : (done == 1 ? "停止/完成" : QString("未知/异常(%1)").arg(done));
+			}
 			const QString sourceText = QString::fromStdString(pRobotDriver->GetStateMonitorSourceText());
-			// 扫描匹配时间轴每次刷新现读配置：管理页下拉切换后，下一个刷新周期即更新，与扫描实际取值一致。
+			// 主页只展示当前机器人的有效时间轴；配置入口统一放在控制单元管理。
 			const MeasureThenWeldRuntimeConfig::ScanTimestampSource monitorScanTimestampSource =
-				MeasureThenWeldRuntimeConfig::LoadScanTimestampSource();
+				MeasureThenWeldRuntimeConfig::EffectiveScanTimestampSource(
+					MeasureThenWeldRuntimeConfig::LoadScanTimestampSource(QString::fromStdString(pRobotDriver->RobotName())),
+					pRobotDriver->Supports(RobotDriverCapability::RobotTimestamp));
 			const QString scanAxisText = QString("%1(%2)")
 				.arg(MeasureThenWeldRuntimeConfig::DisplayName(monitorScanTimestampSource))
 				.arg(MeasureThenWeldRuntimeConfig::FieldName(monitorScanTimestampSource));
@@ -10680,6 +11035,15 @@ void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
 
 bool QtWidgetsApplication4::eventFilter(QObject* watched, QEvent* event)
 {
+	// 激活入口必须在账号未登录/失效时仍可操作。
+	if (auto* licenseWidget = qobject_cast<QWidget*>(watched))
+	{
+		if (licenseWidget->window()->objectName() == QStringLiteral("LicenseDialog")
+			|| licenseWidget->window()->property("_license_dialog").toBool())
+		{
+			return QMainWindow::eventFilter(watched, event);
+		}
+	}
 	if (event != nullptr && event->type() == QEvent::Show)
 	{
 		QWidget* shownWindow = qobject_cast<QWidget*>(watched);
@@ -11145,6 +11509,110 @@ int QtWidgetsApplication4::FindFirstReadyRobotUnitIndex() const
     return -1;
 }
 
+void QtWidgetsApplication4::RefreshLicenseState()
+{
+	if (m_licenseStateRefreshing) return;
+	QScopedValueRollback<bool> refreshing(m_licenseStateRefreshing, true);
+	auto& license = LicenseManager::Instance();
+	QString reason;
+	const bool denied = !license.CanStartProtectedOperation(&reason);
+	const bool busy = RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow();
+	bool beginStop = false;
+	if (denied && !m_licenseLockEpisode)
+	{
+		m_licenseLockEpisode = true;
+		m_licenseStopPending = busy;
+		beginStop = busy;
+	}
+	if (m_licenseStopPending && !busy)
+	{
+		m_licenseStopPending = false;
+	}
+	if (!denied && !m_licenseStopPending)
+	{
+		m_licenseLockEpisode = false;
+	}
+	RobotOperationLease::SetLicenseOperationsAllowed(!denied && !m_licenseStopPending,
+		m_licenseStopPending ? QStringLiteral("授权策略正在等待机器人安全停止确认。") : reason);
+	if (m_licenseStopPending)
+	{
+		license.SetRuntimeState(QStringLiteral("robotBusy"));
+		license.SetEffectStatus(QStringLiteral("pendingSafeStop"));
+		// 停机尚未回读确认，绝不向管理端确认已应用。
+	}
+	else
+	{
+		license.SetRuntimeState(busy
+			? (denied ? QStringLiteral("safeRecovery") : QStringLiteral("robotBusy"))
+			: QStringLiteral("idle"));
+		license.SetEffectStatus(denied ? QStringLiteral("locked") : QStringLiteral("active"));
+		license.AcknowledgeAppliedPolicy();
+	}
+	if (auto* label = findChild<QLabel*>(QStringLiteral("LicenseStatusLabel")))
+	{
+		QString state = license.StatusText();
+		label->setVisible(license.Mode() != LicenseManager::LicenseMode::Off);
+		label->setToolTip(QStringLiteral("<qt>")
+			+ state.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br/>"))
+			+ QStringLiteral("</qt>"));
+		state = state.section(QLatin1Char('\n'), 0, 1);
+		if (m_licenseStopPending) state += QStringLiteral(" | 等待安全停止确认");
+		// AutoText 只启发式识别首行；状态在链接前含换行时会把整段显示为原始 HTML。
+		// 每次刷新重申格式，避免后续通用样式/属性更新把此专用链接标签切回纯文本。
+		label->setTextFormat(Qt::RichText);
+		label->setOpenExternalLinks(false);
+		label->setTextInteractionFlags(Qt::LinksAccessibleByMouse | Qt::LinksAccessibleByKeyboard);
+		const QString text = state.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br/>"))
+			+ QStringLiteral("　<a style='color:#9ED8DB' href='license'>软件授权 / 激活</a>");
+		if (label->text() != text) label->setText(text);
+	}
+	if (beginStop)
+	{
+		StopTrackedRobotOperations(false, false);
+	}
+	if (denied && !busy && !m_licenseExpiryShown)
+	{
+		m_licenseExpiryShown = true;
+		// 到期/锁定只展示授权界面；恢复有效授权之后才重新展示原窗口。
+		const bool previousQuitOnLastWindowClosed = QApplication::quitOnLastWindowClosed();
+		QApplication::setQuitOnLastWindowClosed(false);
+		QList<QPointer<QWidget>> visibleWindows;
+		for (QWidget* window : QApplication::topLevelWidgets())
+		{
+			if (window && window->isVisible()
+				&& window->objectName() != QStringLiteral("LicenseDialog"))
+			{
+				visibleWindows.append(window);
+				window->hide();
+			}
+		}
+		std::function<void()> safetyRecovery;
+		if (m_pMeasureThenWeldPage != nullptr)
+		{
+			QPointer<MeasureThenWeldDialog> recoveryPage(m_pMeasureThenWeldPage);
+			safetyRecovery = [recoveryPage]()
+				{ if (recoveryPage) recoveryPage->StartSafeRetreatRecoveryForLicense(); };
+		}
+		license.ShowDialog(nullptr, safetyRecovery,
+			[this]() { StopTrackedRobotOperations(false, false); },
+			[this]() { return RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow(); }, true);
+		if (license.CanStartProtectedOperation())
+		{
+			for (const auto& window : visibleWindows)
+			{
+				if (window) window->show();
+			}
+			QApplication::setQuitOnLastWindowClosed(previousQuitOnLastWindowClosed);
+			m_licenseExpiryShown = false;
+			RefreshLicenseState();
+		}
+		else
+		{
+			QCoreApplication::quit();
+		}
+	}
+}
+
 void QtWidgetsApplication4::RefreshRobotOperationAvailability()
 {
     QString issueText;
@@ -11387,7 +11855,10 @@ void QtWidgetsApplication4::RunFunctionTestDashboardTool(const QString& actionId
 	if (m_pFunctionTestPage == nullptr)
 	{
 		m_pFunctionTestPage = new FunctionTestDialog(
-			m_pContralUnit, currentUnitIndex, ScanCameraCacheForUnit(currentUnitIndex), targetStack);
+			m_pContralUnit, currentUnitIndex, ScanCameraCacheForUnit(currentUnitIndex), targetStack,
+			[this](const QString& workflowId, int unitIndex)
+				{ return OpenRobotAdaptorAcceptanceWorkflow(workflowId, unitIndex); },
+			[this](int unitIndex) { return ScanCameraCacheForUnit(unitIndex); });
 		m_nFunctionTestPageUnitIndex = currentUnitIndex;
 		PrepareEmbeddedPage(m_pFunctionTestPage, targetStack);
 	}
@@ -11937,34 +12408,6 @@ void QtWidgetsApplication4::SetDesktopIconWithBackground(bool withBackground)
 	RefreshAllWindowIcons();                       // 窗口标题栏 + 任务栏即时刷新
 	BrandingConfig::ApplyDesktopShortcutIcons();   // 桌面/开始菜单快捷方式图标重写（找不到则跳过）
 	RefreshDesktopIconBgButtonUi();
-}
-
-void QtWidgetsApplication4::RefreshScanTimestampSourceUi()
-{
-	if (m_pScanTimestampSourceCombo == nullptr)
-	{
-		return;
-	}
-
-	const QString storageValue = MeasureThenWeldRuntimeConfig::ToStorageString(
-		MeasureThenWeldRuntimeConfig::LoadScanTimestampSource());
-	const int index = m_pScanTimestampSourceCombo->findData(storageValue);
-	QSignalBlocker blocker(m_pScanTimestampSourceCombo);
-	m_pScanTimestampSourceCombo->setCurrentIndex(index >= 0 ? index : 0);
-}
-
-void QtWidgetsApplication4::RefreshStepSdkInterfaceModeUi()
-{
-	if (m_pStepSdkInterfaceModeCombo == nullptr)
-	{
-		return;
-	}
-
-	const QString storageValue = MeasureThenWeldRuntimeConfig::ToStorageString(
-		MeasureThenWeldRuntimeConfig::LoadStepSdkInterfaceMode());
-	const int index = m_pStepSdkInterfaceModeCombo->findData(storageValue);
-	QSignalBlocker blocker(m_pStepSdkInterfaceModeCombo);
-	m_pStepSdkInterfaceModeCombo->setCurrentIndex(index >= 0 ? index : 0);
 }
 
 void QtWidgetsApplication4::RefreshTouchKeyboardModeUi()
@@ -17214,30 +17657,50 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 {
 	if (checked)
 	{
+		// The preview window is also the camera diagnostic surface.  Always show
+		// it first, then report configuration/connection state inside the window.
+		OpenGroovePointCloudDialog();
+		auto showDisconnected = [this](const QString& reason)
+		{
+			m_sGrooveCameraStatusText = reason;
+			if (m_pGroovePointCloudDialog != nullptr)
+			{
+				static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ClearPreview(
+					QStringLiteral("相机未连接"), reason);
+			}
+		};
+
 		QString setupIssue;
 		if (!IsCurrentRobotSetupReady(true, false, &setupIssue))
 		{
-			QMessageBox::warning(this, "坡口相机测试", setupIssue);
-			ui.GrooveCameraTestBtn->setChecked(false);
+			showDisconnected(setupIssue);
 			RefreshRobotOperationAvailability();
 			return;
 		}
 		QString cameraIP;
 		const int unitIndex = CurrentRobotUnitIndex();
+		int configuredCameraPort = 0;
+		if (!LoadGrooveCameraEndpointForUnit(unitIndex, cameraIP, configuredCameraPort)
+			|| cameraIP.trimmed().isEmpty())
+		{
+			showDisconnected(QStringLiteral(
+				"当前机器人未配置扫描相机 DeviceAddress。请在“相机参数”中保存测量相机地址后重试。"));
+			return;
+		}
 		RobotDriverAdaptor* cameraDriver = RobotDataHelper::GetRobotDriver(m_pContralUnit, unitIndex);
 		const QString cameraOwner = RobotOperationLease::CurrentOwner(cameraDriver);
 		if (!cameraOwner.isEmpty())
 		{
-			QMessageBox::warning(this, "坡口相机测试",
-				QString("当前机器人正在执行“%1”，不能打开预览并清空本轮相机缓存。").arg(cameraOwner));
-			ui.GrooveCameraTestBtn->setChecked(false);
+			showDisconnected(
+				QString("当前机器人正在执行“%1”，预览暂未连接，且不会清空本轮相机缓存。")
+					.arg(cameraOwner));
 			RefreshRobotOperationAvailability();
 			return;
 		}
-		if (!EnsureScanCameraRunningForUnit(unitIndex, cameraIP, true))
+		if (!EnsureScanCameraRunningForUnit(unitIndex, cameraIP, true, false))
 		{
-			QMessageBox::warning(this, "坡口相机测试", "未读取到当前机器人扫描相机的 DeviceAddress。");
-			ui.GrooveCameraTestBtn->setChecked(false);
+			showDisconnected(QString("相机 %1 连接启动失败，请检查网络、端口和相机状态。")
+				.arg(cameraIP));
 			return;
 		}
 
@@ -17255,13 +17718,20 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 			.arg(portName)
 			.arg(cameraPort > 0 ? cameraPort : (m_bUseSharedScanCameraReceiver ? 50004 : 50006))
 			.arg(receiveMode);
-		OpenGroovePointCloudDialog();
 		if (m_pGroovePointCloudDialog != nullptr)
 		{
 			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ClearPreview(
-				"正在等待相机帧...",
+				"正在连接相机...",
 				m_sGrooveCameraStatusText);
-			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->RefreshCameraControlParams();
+			QPointer<GroovePointCloudDialog> previewDialog =
+				static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog);
+			QTimer::singleShot(0, previewDialog, [previewDialog]()
+				{
+					if (previewDialog != nullptr)
+					{
+						previewDialog->RefreshCameraControlParams();
+					}
+				});
 			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetImageTransportToggleHandler(
 				[this, unitIndex](bool enabled)
 				{
@@ -17376,6 +17846,29 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 								: QString("接收缓冲帧数已排队应用：%1").arg(count),
 							true);
 					}
+				});
+			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetCameraLinePointMirrorEnabled(
+				MeasureThenWeldRuntimeConfig::LoadCameraLinePointMirrorZ());
+			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetCameraLinePointMirrorHandler(
+				[this](bool enabled, QString* error) -> bool
+				{
+					if (HasRunningMeasureThenWeldFlow())
+					{
+						if (error != nullptr)
+						{
+							*error = QStringLiteral("先测后焊正在运行，禁止切换流程Z镜像；本轮扫描继续使用启动时冻结的设置。");
+						}
+						return false;
+					}
+					if (!MeasureThenWeldRuntimeConfig::SaveCameraLinePointMirrorZ(enabled))
+					{
+						if (error != nullptr)
+						{
+							*error = QStringLiteral("流程Z镜像设置写入配置库失败，状态未改变。");
+						}
+						return false;
+					}
+					return true;
 				});
 		}
 		if (CameraFrameCache* liveCache = ScanCameraCacheForUnit(unitIndex))
@@ -17725,8 +18218,20 @@ void QtWidgetsApplication4::OpenWeldProcessDialog()
 
 void QtWidgetsApplication4::OpenFunctionTestDialog()
 {
-	PageOpenTrace trace("功能测试");
-	if (!RequirePermission(kRoleEngineer, "功能测试"))
+	OpenFunctionTestPage(false);
+}
+
+void QtWidgetsApplication4::OpenRobotAdaptorAcceptanceDialog()
+{
+	OpenFunctionTestPage(true);
+}
+
+void QtWidgetsApplication4::OpenFunctionTestPage(bool showAdaptorAcceptance)
+{
+	const QString pageName = showAdaptorAcceptance
+		? QStringLiteral("机器人适配测试") : QStringLiteral("功能测试");
+	PageOpenTrace trace(pageName);
+	if (!RequirePermission(kRoleEngineer, pageName))
 	{
 		return;
 	}
@@ -17736,7 +18241,7 @@ void QtWidgetsApplication4::OpenFunctionTestDialog()
 	{
 		if (RobotOperationLease::AnyActive())
 		{
-			QMessageBox::warning(this, "功能测试",
+			QMessageBox::warning(this, pageName,
 				QString("机器人硬件操作正在运行（%1），不能切换功能测试目标。")
 					.arg(RobotOperationLease::ActiveSummary()));
 			return;
@@ -17747,11 +18252,68 @@ void QtWidgetsApplication4::OpenFunctionTestDialog()
 	if (m_pFunctionTestPage == nullptr)
 	{
 		m_pFunctionTestPage = new FunctionTestDialog(
-			m_pContralUnit, currentUnitIndex, ScanCameraCacheForUnit(currentUnitIndex), targetStack);
+			m_pContralUnit, currentUnitIndex, ScanCameraCacheForUnit(currentUnitIndex), targetStack,
+			[this](const QString& workflowId, int unitIndex)
+				{ return OpenRobotAdaptorAcceptanceWorkflow(workflowId, unitIndex); },
+			[this](int unitIndex) { return ScanCameraCacheForUnit(unitIndex); });
 		m_nFunctionTestPageUnitIndex = currentUnitIndex;
 		PrepareEmbeddedPage(m_pFunctionTestPage, targetStack);
 	}
+	if (showAdaptorAcceptance && m_pFunctionTestPage != nullptr)
+	{
+		m_pFunctionTestPage->ShowAdaptorAcceptancePage();
+	}
+	else if (m_pFunctionTestPage != nullptr)
+	{
+		m_pFunctionTestPage->ShowSingleTestPage();
+	}
 	ShowCurrentEmbeddedPage(m_pFunctionTestPage);
+}
+
+bool QtWidgetsApplication4::OpenRobotAdaptorAcceptanceWorkflow(
+	const QString& workflowId, int unitIndex)
+{
+	if (workflowId != QStringLiteral("measureThenWeldScan")
+		&& workflowId != QStringLiteral("measureThenWeldActual"))
+	{
+		QMessageBox::warning(this, "机器人适配验收",
+			QStringLiteral("未识别的验收业务流程：%1").arg(workflowId));
+		return false;
+	}
+	QString driverIssue;
+	if (!IsRobotUnitDriverReady(unitIndex, &driverIssue))
+	{
+		QMessageBox::warning(this, "机器人适配验收", driverIssue);
+		return false;
+	}
+	if (RobotOperationLease::AnyActive())
+	{
+		QMessageBox::warning(this, "机器人适配验收",
+			QStringLiteral("机器人硬件操作正在运行（%1），不能切换验收流程目标。")
+				.arg(RobotOperationLease::ActiveSummary()));
+		return false;
+	}
+	if (m_pRobotSelectorCombo == nullptr)
+	{
+		QMessageBox::warning(this, "机器人适配验收", "主界面机器人选择器不可用。");
+		return false;
+	}
+	const int comboIndex = m_pRobotSelectorCombo->findData(unitIndex);
+	if (comboIndex < 0)
+	{
+		QMessageBox::warning(this, "机器人适配验收",
+			QStringLiteral("主界面找不到控制单元编号 %1，未打开业务流程。").arg(unitIndex));
+		return false;
+	}
+	m_pRobotSelectorCombo->setCurrentIndex(comboIndex);
+	if (CurrentRobotUnitIndex() != unitIndex)
+	{
+		QMessageBox::warning(this, "机器人适配验收", "主界面机器人切换未生效，未打开业务流程。");
+		return false;
+	}
+	OpenMeasureThenWeldDialog();
+	return m_pMeasureThenWeldPage != nullptr
+		&& m_nMeasureThenWeldPageUnitIndex == unitIndex;
 }
 
 void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
@@ -17761,6 +18323,16 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 	if (!IsRobotUnitDriverReady(currentUnitIndex))
 	{
 		QMessageBox::warning(this, "先测后焊", "当前机器人驱动不可用。");
+		return;
+	}
+	RobotDriverAdaptor* workflowDriver = RobotDataHelper::GetRobotDriver(m_pContralUnit, currentUnitIndex);
+	const std::uint64_t entryMask = MeasureThenWeldCapabilityPolicy::EntryMask<RobotDriverCapability>();
+	if (workflowDriver == nullptr || !workflowDriver->SupportsMask(entryMask))
+	{
+		QMessageBox::warning(this, "先测后焊", workflowDriver == nullptr
+			? QStringLiteral("当前机器人驱动不可用。")
+			: QStringLiteral("当前机器人品牌底层缺少适配能力：%1；功能已限制。")
+				.arg(QString::fromUtf8(workflowDriver->MissingCapabilitiesText(entryMask).c_str())));
 		return;
 	}
 	QString setupIssue;
@@ -18114,10 +18686,13 @@ void QtWidgetsApplication4::FanucConnectTest()
 	{
 		return;
 	}
-	if (pRobotDriver->IsConnected())
+	if (QMessageBox::question(this, "机器人连接与初始化",
+		"请核对所选机器人和现场实体一致，并确认作业区域安全、实体急停可用。\n"
+		"本次将建立或复用通信连接，并通过品牌适配层执行连接后初始化："
+		"自动清除可复位报警、切换自动模式、伺服上电等前置工作，不启动运动。\n"
+		"实体急停或控制权条件不满足时会停止初始化，不会绕过安全条件。是否继续？",
+		QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
 	{
-		RefreshDashboardConnectionState();
-		QMessageBox::information(this, "机器人连接", "当前机器人已经连接。");
 		return;
 	}
 	QString leaseError;
@@ -18130,20 +18705,23 @@ void QtWidgetsApplication4::FanucConnectTest()
 	}
 
 	const RobotConnectionEndpoint endpoint = pRobotDriver->ControlEndpoint();
-	const bool ok = pRobotDriver->Connect();
+	const bool reused = pRobotDriver->IsConnected();
+	const bool ok = reused || pRobotDriver->Connect();
 	if (ok)
 	{
 		QStringList connectSteps;
 		pRobotDriver->StartStateMonitor(50);
 		std::string initializationSummary;
 		const bool initializationOk = pRobotDriver->InitializeAfterConnect(&initializationSummary);
+		const bool connectedReadback = pRobotDriver->IsConnected();
+		connectSteps << (reused ? "连接来源：复用已有连接。" : "连接来源：本次新建连接。");
 		if (!initializationSummary.empty())
 		{
 			connectSteps << DecodeRobotMessageText(initializationSummary);
 		}
-		if (!initializationOk)
+		if (!initializationOk || !connectedReadback)
 		{
-			connectSteps << "机器人连接后初始化未完全成功："
+			connectSteps << "连接后初始化或连接回读失败："
 				+ DecodeRobotMessageText(pRobotDriver->GetLastRobotError());
 		}
 		if (!pRobotDriver->Supports(RobotDriverCapability::FtpFileTransfer))
@@ -18154,17 +18732,23 @@ void QtWidgetsApplication4::FanucConnectTest()
 		const QString extraText = connectSteps.isEmpty()
 			? QString()
 			: QString("\n%1").arg(connectSteps.join('\n'));
-		QMessageBox::information(
-			this,
-			"机器人连接",
-			DecodeRobotMessageText(GetStr("机器人连接成功：%s:%d",
-				endpoint.host.c_str(),
-				endpoint.port)) + extraText);
+		if (initializationOk && connectedReadback)
+		{
+			QMessageBox::information(this, "机器人连接",
+				DecodeRobotMessageText(GetStr("机器人连接及前置初始化成功：%s:%d",
+					endpoint.host.c_str(), endpoint.port)) + extraText);
+		}
+		else
+		{
+			QMessageBox::warning(this, "机器人连接",
+				QStringLiteral("通信连接已建立，但前置初始化失败，未就绪。") + extraText);
+		}
 	}
 	else
 	{
 		QMessageBox::warning(this, "机器人连接",
-			DecodeRobotMessageText(GetStr("连接失败：%s:%d", endpoint.host.c_str(), endpoint.port)));
+			DecodeRobotMessageText(GetStr("连接失败：%s:%d", endpoint.host.c_str(), endpoint.port))
+			+ "\n" + DecodeRobotMessageText(pRobotDriver->GetLastRobotError()));
 	}
 	RefreshDashboardConnectionState();
 }
@@ -18301,6 +18885,11 @@ void QtWidgetsApplication4::RobotClearAlarmTest()
 
 void QtWidgetsApplication4::RobotEmergencyStop()
 {
+	StopTrackedRobotOperations(true, true);
+}
+
+void QtWidgetsApplication4::StopTrackedRobotOperations(bool notifyWhenEmpty, bool notifySuccess)
+{
 	struct StopTarget
 	{
 		RobotDriverAdaptor* driver = nullptr;
@@ -18329,7 +18918,8 @@ void QtWidgetsApplication4::RobotEmergencyStop()
 	if (targets.empty())
 	{
 		RefreshDashboardConnectionState();
-		QMessageBox::information(this, "安全停止", "当前没有本软件跟踪的活动机器人硬件流程。");
+		if (notifyWhenEmpty)
+			QMessageBox::information(this, "安全停止", "当前没有本软件跟踪的活动机器人硬件流程。");
 		return;
 	}
 
@@ -18342,7 +18932,7 @@ void QtWidgetsApplication4::RobotEmergencyStop()
 	}
 
 	QPointer<QtWidgetsApplication4> self(this);
-	std::thread([self, targets = std::move(targets)]() mutable
+	std::thread([self, targets = std::move(targets), notifySuccess]() mutable
 		{
 			std::vector<StopResult> results(targets.size());
 			std::vector<std::thread> workers;
@@ -18389,7 +18979,7 @@ void QtWidgetsApplication4::RobotEmergencyStop()
 				worker.join();
 			}
 
-			QMetaObject::invokeMethod(qApp, [self, results = std::move(results)]()
+			QMetaObject::invokeMethod(qApp, [self, results = std::move(results), notifySuccess]()
 				{
 					if (self == nullptr)
 					{
@@ -18411,7 +19001,7 @@ void QtWidgetsApplication4::RobotEmergencyStop()
 					self->RefreshDashboardConnectionState();
 					if (allOk)
 					{
-						QMessageBox::information(self, "安全停止", lines.join('\n'));
+						if (notifySuccess) QMessageBox::information(self, "安全停止", lines.join('\n'));
 					}
 					else
 					{

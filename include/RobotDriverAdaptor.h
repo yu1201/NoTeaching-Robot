@@ -1,5 +1,6 @@
 #pragma once
 #include "Const.h"
+#include "RobotCalibrationTypes.h"
 
 
 #include <string>   // 必须包含，否则无法使用std::string
@@ -21,6 +22,7 @@
 // 引入日志头文件
 #include "RobotLog.h"
 #include "ConfigSection.h"
+#include "RobotModePreparationTest.h"
 
 
 enum class RobotDriverFamily
@@ -30,6 +32,10 @@ enum class RobotDriverFamily
     Step,
     Inovance,
 };
+
+// 全业务链路把控制器 Tool1 定义为已标定焊枪 TCP。品牌底层可以使用各自的
+// 原生名称/编号语法，但不得把未配置值降级为 Tool0 或运行时任意工具。
+inline constexpr int kApplicationGunToolNumber = 1;
 
 enum class RobotDriverCapability : std::uint64_t
 {
@@ -62,12 +68,20 @@ enum class RobotDriverCapability : std::uint64_t
     FtpFileTransfer = 1ULL << 25,
     HandEyeMatrixRead = 1ULL << 26,
     HandEyeSupportProgramInstall = 1ULL << 27,
+    CircularMotion = 1ULL << 28,
+    RealRegister = 1ULL << 29,
+    StructuredControllerStatus = 1ULL << 30,
+    ControllerKinematicsRead = 1ULL << 31,
+    ControllerKinematicsCalculate = 1ULL << 32,
+    CalibrationAssetDiscovery = 1ULL << 33,
 };
 
 constexpr std::uint64_t RobotDriverCapabilityBit(RobotDriverCapability capability)
 {
     return static_cast<std::uint64_t>(capability);
 }
+
+inline constexpr unsigned int RobotDriverCapabilityMaxBitIndex = 33;
 
 constexpr std::uint64_t operator|(RobotDriverCapability left, RobotDriverCapability right)
 {
@@ -96,10 +110,53 @@ struct RobotMotionStatus
 
 enum class RobotOperationMode
 {
+    Unknown = 0,
     Manual = 1,
     Automatic = 2,
     ExternalAutomatic = 3,
     Start = 4,
+};
+
+// 品牌无关的控制器状态快照。known 字段用于区分“明确为 false”和“底层协议未提供”。
+// 业务层只能使用本结构判断状态，不得解析品牌驱动的状态字符串。
+struct RobotControllerStatus
+{
+    bool valid = false;
+    bool connected = false;
+    RobotOperationMode operationMode = RobotOperationMode::Unknown;
+    int rawOperationMode = -1;
+    bool emergencyStopKnown = false;
+    bool emergencyStop = false;
+    bool servoPowerKnown = false;
+    bool servoPowered = false;
+    bool systemFaultKnown = false;
+    bool systemFault = false;
+    bool systemWarning = false;
+    int systemErrorCode = -1;
+    bool controlOwnerKnown = false;
+    bool controlOwnedByApi = false;
+    int rawControlOwner = -1;
+    bool controlPermitKnown = false;
+    bool hasControlPermit = false;
+    int rawPermitState = -1;
+    RobotMotionStatus motion;
+    long long pcRecvMs = 0;
+    std::string detail;
+};
+
+// 品牌无关的控制器运动学资产校验结果。业务层只读取本结构，不解析品牌命令、
+// FTP 参数文件或厂商坐标字段。品牌底层必须完成来源交叉校验和坐标约定转换。
+struct RobotKinematicsValidationResult
+{
+    bool valid = false;
+    std::string modelName;
+    std::string acquisitionSummary;
+    double currentJointDegrees[6] = {};
+    T_ROBOT_COORS controllerTcpInActiveWorkobject;
+    T_ROBOT_COORS controllerFlangeInBase;
+    T_ROBOT_COORS calculatedFlangeInBase;
+    double positionErrorMm = 0.0;
+    double orientationErrorDeg = 0.0;
 };
 
 enum class RobotTrajectoryPurpose
@@ -153,6 +210,8 @@ struct RobotFileTransferProfile
     std::string defaultRemoteDirectory;
     std::string defaultLocalDirectory;
     std::vector<std::string> localFileFilters;
+    // 适配验收中允许按原路径回传的主程序扩展名；变量、工程配置和数据文件不得进入通用回传测试。
+    std::vector<std::string> acceptanceProgramExtensions;
 };
 
 struct RobotProgramInventoryResult
@@ -213,6 +272,10 @@ public:
     // 唯一的业务层机器人契约。品牌、SDK、寄存器、程序格式和原生速度单位
     // 必须由派生驱动在本层以下消化，业务代码不得 dynamic_cast 具体驱动。
     virtual RobotDriverDescriptor DriverDescriptor() const = 0;
+    // Display-only metadata for the indexed INT/REAL acceptance contracts.
+    // Brands translate aliases here; business UI never interprets native names.
+    virtual std::string AcceptanceRegisterName(bool real, int index) const
+    { return std::string(real ? "REAL" : "INT") + std::to_string(index); }
     virtual std::uint64_t DriverCapabilities() const = 0;
     virtual RobotConnectionEndpoint ControlEndpoint() const = 0;
     virtual bool Connect() = 0;
@@ -220,6 +283,25 @@ public:
     virtual RobotFileTransferProfile FileTransferProfile() const = 0;
     virtual std::shared_ptr<RobotFileTransferSession> CreateFileTransferSession(
         std::string* error = nullptr) const = 0;
+    // 只读获取控制器机械资产并完成当前关节/直角坐标闭环校验。成功后品牌底层可将
+    // 已验证模型安装为本次运行时模型；不得在此接口中改变控制器参数或触发运动。
+    virtual bool RefreshKinematicsFromController(
+        RobotKinematicsValidationResult& result);
+    virtual bool ReadKinematicsReference(const RobotKinematicsProfile& profile,
+        RobotKinematicsReference& result, std::string& error);
+    virtual bool CalculateControllerForward(const RobotKinematicsReference& reference,
+        const Eigen::Matrix<double,6,1>& joints, RobotKinematicsPoint& result, std::string& error);
+    virtual bool CalculateControllerInverse(const RobotKinematicsReference& reference,
+        const RobotKinematicsPoint& target, RobotKinematicsPoint& result, std::string& error);
+    virtual bool DiscoverCalibrationAssets(RobotCalibrationDiscovery& result,
+        std::atomic_bool& cancel, std::string& error);
+    virtual bool ReadControllerHandEye(int sensorIndex, RobotControllerHandEye& result, std::string& error);
+    virtual bool ValidateControllerHandEyeContext(const RobotControllerHandEye& expected, std::string& error);
+    // Shared workflows: only these virtual read/calculation contracts access hardware.
+    RobotCalibrationRunResult OptimizeKinematicsModel(const RobotKinematicsOptimizationOptions& options,
+        std::atomic_bool& cancel, const RobotCalibrationProgress& progress);
+    RobotCalibrationRunResult AcquireCalibrationAssets(std::atomic_bool& cancel,
+        const RobotCalibrationProgress& progress);
     const std::string& RobotName() const noexcept;
     const std::string& CustomName() const noexcept;
     int RobotType() const noexcept;
@@ -243,11 +325,21 @@ public:
         std::initializer_list<RobotDriverCapability> capabilities) const;
     static const char* CapabilityDisplayName(RobotDriverCapability capability);
     virtual bool ValidateLinearSpeedMmPerMin(double speedMmPerMin, std::string* error = nullptr) const = 0;
+    // 单点运动接口只负责完成前置检查、下发命令并冻结本次运动身份；命令被控制器受理后立即返回。
+    // true 不表示已经到位。调用方必须继续读取标准运动状态，并以 CheckRobotDone 的终态见证收尾。
+    // 品牌底层不得在 Move* 内等待整段运动，否则扫描/标定等业务无法并发采集机器人与传感器数据。
     virtual bool MoveLinearMmPerMin(
         const T_ROBOT_COORS& target,
         double speedMmPerMin,
         int externalAxleType,
         const int* configuration = nullptr) = 0;
+    virtual bool MoveCircularMmPerMin(
+        const T_ROBOT_COORS& via,
+        const T_ROBOT_COORS& target,
+        double speedMmPerMin,
+        int externalAxleType,
+        const int* viaConfiguration = nullptr,
+        const int* targetConfiguration = nullptr) = 0;
     virtual bool MoveJointPercent(
         const T_ANGLE_PULSE& target,
         double speedPercent,
@@ -256,6 +348,16 @@ public:
     virtual RobotMotionStatus ReadMotionStatusPassive(
         long long* pRobotMs = nullptr,
         long long* pPcRecvMs = nullptr) = 0;
+    virtual RobotControllerStatus ReadControllerStatus() = 0;
+    // Optional brand-owned preparation diagnostics; business code never sends raw mode commands.
+    virtual std::vector<RobotModePreparationTestCase> ModePreparationTestCases() const { return {}; }
+    virtual bool RunModePreparationTestCase(const std::string&, RobotModePreparationTestResult& result)
+    { result = {}; result.evidence = "当前品牌未提供无位移模式组合测试。"; return false; }
+    // Explicitly select AND persist a verified recipe in this control unit's
+    // database. Reconnect restores the recipe after brand-owned identity checks,
+    // never live permission, servo state, or a previous operation's ownership.
+    virtual bool UseVerifiedModePreparation(const std::string&) { return false; }
+    virtual std::string ActiveModePreparationId() const { return {}; }
     virtual bool ReserveTrajectory(
         RobotTrajectoryPurpose purpose,
         RobotTrajectoryHandle& handle) = 0;
@@ -299,6 +401,10 @@ public:
     virtual RobotPersistentRecoveryStrategy PersistentRecoveryStrategy() const = 0;
     virtual bool AbortPersistedMotion(const std::string& expectedProgramName) = 0;
     virtual bool SetOperationMode(RobotOperationMode mode) = 0;
+    // Explicit user-triggered connection preparation. Implementations may
+    // validate remote control, reset resettable alarms, select automatic mode
+    // and enable servo with readback, but must not start motion. Connect and
+    // background reconnect remain communication-only and never call this hook.
     virtual bool InitializeAfterConnect(std::string* summary = nullptr) = 0;
     virtual bool ShutdownBeforeDisconnect() = 0;
     virtual void ReloadRuntimeConfiguration() = 0;
@@ -350,6 +456,7 @@ public:
     // 纯文件离线 CLI 不需要状态采样，也不允许后台监控线程触发控制器连接。
     static std::atomic<bool> s_startStateMonitorsAtConstruct;
     virtual bool cleanAlarm() = 0;
+    virtual bool ServoOff() = 0;
     virtual bool ServoOn() = 0;
     void ClearLastRobotError();
     void SetLastRobotError(const std::string& error);
@@ -373,6 +480,10 @@ public:
         long long pcRecvMs = 0;
         T_ROBOT_COORS pose;
         T_ANGLE_PULSE pulse;
+        RobotMotionStatus motion;
+        // Legacy binary completion view retained for existing consumers.
+        // Use motion.state when the distinction between running, paused,
+        // interrupted and faulted matters.
         int done = -1;
         bool valid = false;
     };
@@ -410,6 +521,7 @@ public:
     virtual int GetIntVar(int nIndex, const char* cStrPreFix = "INT") = 0;
     virtual bool SetIntVar(int nIndex, int nValue, int score = 2, const char* cStrPreFix = "INT") = 0;
     virtual bool SetIntVar(const char* name, int value, int score = 2) = 0;
+    virtual bool TryGetRealVar(int nIndex, double& value, const char* cStrPreFix = "REAL", int score = 1) = 0;
     virtual bool SetRealVar(int nIndex, double value, const char* cStrPreFix = "REAL", int score = 1) = 0;
     virtual int GetPosVar(long lPvarIndex, double array[6], int config[7] = { 0 }, int MoveType = POSVAR) = 0;
     // 从机器人变量中读取手眼矩阵。rotation 为行优先 3x3，translation 为 mm 单位平移。
@@ -436,6 +548,11 @@ private:
 
 protected:
     virtual void PrepareStateMonitor();
+    bool InstallValidatedKinematicsModel(
+        const T_KINEMATICS& kinematics,
+        const T_AXISUNIT& axisUnit,
+        const T_AXISLIMITANGLE& axisLimits,
+        std::string* error = nullptr);
 
 //----------------------------------------变量类--------------------------------------------//
 protected:

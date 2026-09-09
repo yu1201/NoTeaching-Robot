@@ -60,9 +60,11 @@ public:
 		std::string* error = nullptr) const override;
 	bool ValidateLinearSpeedMmPerMin(double speedMmPerMin, std::string* error = nullptr) const override;
 	bool MoveLinearMmPerMin(const T_ROBOT_COORS& target, double speedMmPerMin, int externalAxleType, const int* configuration = nullptr) override;
+	bool MoveCircularMmPerMin(const T_ROBOT_COORS& via, const T_ROBOT_COORS& target, double speedMmPerMin, int externalAxleType, const int* viaConfiguration = nullptr, const int* targetConfiguration = nullptr) override;
 	bool MoveJointPercent(const T_ANGLE_PULSE& target, double speedPercent, int externalAxleType) override;
 	RobotMotionStatus ReadMotionStatus() override;
 	RobotMotionStatus ReadMotionStatusPassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
+	RobotControllerStatus ReadControllerStatus() override;
 	bool ReserveTrajectory(RobotTrajectoryPurpose purpose, RobotTrajectoryHandle& handle) override;
 	bool DownlinkTrajectory(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, RobotTrajectoryPurpose purpose, RobotTrajectoryHandle& handle) override;
 	bool ExportTrajectoryProgramFiles(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, RobotTrajectoryPurpose purpose, const std::string& outputDirectory, RobotTrajectoryHandle& handle, std::string* error = nullptr) override;
@@ -147,7 +149,7 @@ public:
 	//下载文件,埃斯顿为RemoteFilePath，本地为LocalFilePath
 	int DownloadFile(std::string RemoteFilePath, std::string LocalFilePath);
 
-	bool ServoOff();
+	bool ServoOff() override;
 	bool ServoOn() override;
 
 	//清除报警信息+
@@ -245,6 +247,7 @@ public:
 	//设置一个指定I变量
 	bool SetIntVar(const char* name, int value, int score = 2) override;
 	//设置Real变量
+	bool TryGetRealVar(int nIndex, double& value, const char* cStrPreFix = "REAL", int score = 1) override;
 	bool SetRealVar(int nIndex, double value, const char* cStrPreFix = "REAL", int score = 1) override;//主要用于发送电流电压 scoper,0-系统，1-全局，2-工程，3-程序
 
 	/****************************************************运动函数****************************************************/
@@ -266,8 +269,9 @@ public:
 
 	HANDLE m_hMutex;
 	// 常规 RobotComClient command/lifecycle 调用只在单次 SDK 调用期间持此锁；
-	// 文件生成、FTP、普通轮询间隔不持锁。唯一例外是 AbortCurrentProgram：它跨稳定停机
-	// 回读持锁，防止旧流程在 STOP/Kill 与确认之间重新加载或启动程序。
+	// 文件生成、FTP、普通轮询间隔不持锁。连接及被动位姿的一组状态检查/取样需保持
+	// 同一连接快照；AbortCurrentProgram 跨稳定停机回读持锁，防止旧流程在
+	// STOP/Kill 与确认之间重新加载或启动程序。
 	mutable std::recursive_mutex m_sdkCommandMutex;
 	template <typename Function>
 	auto WithSdkCommand(Function&& function) -> decltype(function())
@@ -280,10 +284,12 @@ public:
 	std::string m_sStepProjectName;
 	RobotComClient* m_pSTEPRobotClient;
 
-	// 管理界面切换"STEP接口"模式后调用：作废进程级缓存，下次状态读取重新读库。
-	static void InvalidateStepSdkInterfaceModeCache();
-
 private:
+	// Per-instance connection snapshot. Runtime reload never switches an active
+	// SDK sampling session; a successful reconnect is the activation boundary.
+	std::atomic<bool> m_stepUseTimestampSdkInterface{ false };
+	void LoadStepSdkInterfaceModeSnapshot();
+	bool StepUseTimestampSdkInterface() const;
 	// 品牌通信配置和底层对象只归本驱动所有，不进入适配层公共状态。
 	std::string m_sSocketIP;
 	int m_nSocketPort{ 0 };
