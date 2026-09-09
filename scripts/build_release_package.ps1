@@ -36,6 +36,14 @@ function Copy-DirectoryContent {
     Copy-Item -Path (Join-Path $SourceDir "*") -Destination $TargetDir -Recurse -Force
 }
 
+function Normalize-WindowsCommandFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if ([System.IO.Path]::GetExtension($Path) -cne '.cmd') { return }
+    $text = [System.IO.File]::ReadAllText($Path)
+    $normalized = $text.Replace("`r`n", "`n").Replace("`r", "`n").Replace("`n", "`r`n")
+    [System.IO.File]::WriteAllText($Path, $normalized, [System.Text.UTF8Encoding]::new($false))
+}
+
 function Copy-TrackedReleaseFile {
     param(
         [Parameter(Mandatory = $true)][string]$RelativePath,
@@ -48,6 +56,7 @@ function Copy-TrackedReleaseFile {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
     Copy-Item -LiteralPath $sourcePath -Destination $DestinationPath -Force
+    Normalize-WindowsCommandFile -Path $DestinationPath
 }
 
 function Download-FileIfNeeded {
@@ -470,7 +479,9 @@ New-Item -ItemType Directory -Path $installerToolsDir -Force | Out-Null
 foreach ($toolName in @("ConfigMigrate.exe", "ConfigMigrate_Run.cmd", "ConfigMigrate_Install.ps1")) {
     $toolSource = Join-Path $diagnosticToolsSourceDir $toolName
     if (Test-Path -LiteralPath $toolSource) {
-        Copy-Item -LiteralPath $toolSource -Destination (Join-Path $installerToolsDir $toolName) -Force
+        $toolDestination = Join-Path $installerToolsDir $toolName
+        Copy-Item -LiteralPath $toolSource -Destination $toolDestination -Force
+        Normalize-WindowsCommandFile -Path $toolDestination
     }
     else {
         throw "Database migration installer tool was not found: $toolSource"
