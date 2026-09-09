@@ -16,6 +16,81 @@ struct KeyRow
     double z;
 };
 
+struct DenseProfileFixture
+{
+    QVector<GeometryProjectedPoint> projected;
+    QVector<int> keyIndexes;
+};
+
+DenseProfileFixture BuildDenseProfile(
+    const std::vector<std::pair<double, double>>& vertices,
+    bool reverse)
+{
+    DenseProfileFixture fixture;
+    if (vertices.size() < 2)
+    {
+        return fixture;
+    }
+
+    const double beginS = vertices.front().first;
+    const double endS = vertices.back().first;
+    for (double station = beginS; station <= endS + 1e-9; station += 2.0)
+    {
+        std::size_t segment = 0;
+        while (segment + 2 < vertices.size()
+            && station > vertices[segment + 1].first + 1e-9)
+        {
+            ++segment;
+        }
+        const auto& begin = vertices[segment];
+        const auto& end = vertices[segment + 1];
+        const double ratio = (station - begin.first) / (end.first - begin.first);
+        const double height = begin.second + ratio * (end.second - begin.second);
+
+        GeometryProjectedPoint point;
+        point.inputIndex = static_cast<int>(std::lround(station));
+        point.point = Eigen::Vector3d(station, height, 0.0);
+        point.s = station;
+        point.h = height;
+        point.smoothH = height;
+        fixture.projected.push_back(point);
+    }
+    if (reverse)
+    {
+        std::reverse(fixture.projected.begin(), fixture.projected.end());
+    }
+
+    if (reverse)
+    {
+        for (auto vertex = vertices.rbegin(); vertex != vertices.rend(); ++vertex)
+        {
+            for (int index = 0; index < fixture.projected.size(); ++index)
+            {
+                if (std::abs(fixture.projected[index].s - vertex->first) <= 1e-9)
+                {
+                    fixture.keyIndexes.push_back(index);
+                    break;
+                }
+            }
+        }
+    }
+    else
+    {
+        for (const auto& vertex : vertices)
+        {
+            for (int index = 0; index < fixture.projected.size(); ++index)
+            {
+                if (std::abs(fixture.projected[index].s - vertex.first) <= 1e-9)
+                {
+                    fixture.keyIndexes.push_back(index);
+                    break;
+                }
+            }
+        }
+    }
+    return fixture;
+}
+
 QVector<GeometryProjectedPoint> BuildRobotCPeriodicKeys()
 {
     // RobotC/20260723_001 的拟合关键点。最后一个完整下平台被错误拆成
@@ -342,6 +417,64 @@ bool VerifyRobotC009TwoReferenceDoubleCornersAreMerged()
     std::reverse(projected.begin(), projected.end());
     return verifyDirection(projected, "reverse");
 }
+
+bool VerifyEndpointClippedPlatformsKeepOneVisibleBoundary()
+{
+    // 两端都从平台内部截断：真实自然角序列为 O II OO I。首端只看得到“离开低平台”的 O，
+    // 尾端只看得到“进入高平台”的 I；平台重算不得在范围内各伪造另一个同类角。
+    const std::vector<std::pair<double, double>> vertices{
+        {0.0, 0.0}, {40.0, 0.0}, {110.0, 35.0}, {180.0, 35.0},
+        {250.0, 0.0}, {320.0, 0.0}, {390.0, 35.0}, {460.0, 35.0}
+    };
+    auto verify = [&](bool reverse, const char* label)
+    {
+        const DenseProfileFixture fixture = BuildDenseProfile(vertices, reverse);
+        QVector<char> lapKeys(fixture.keyIndexes.size(), 0);
+        RobotCalculation::LowerWeldFilterParams params;
+        params.cornerPatternRefitEnable = true;
+        params.cornerPlatformMinSegPoints = 8;
+        params.sameTypeShortFlatSlope = 0.15;
+        const QVector<int> refit = RefitCornersByPlatformPattern(
+            fixture.projected, fixture.keyIndexes, lapKeys, params);
+        if (refit.size() != fixture.keyIndexes.size()
+            || refit[1] != fixture.keyIndexes[1]
+            || refit[refit.size() - 2] != fixture.keyIndexes[fixture.keyIndexes.size() - 2])
+        {
+            std::cerr << label
+                      << " endpoint-clipped platform gained a synthetic boundary\n";
+            return false;
+        }
+        return true;
+    };
+    return verify(false, "forward") && verify(true, "reverse");
+}
+
+bool VerifyCompleteEndpointPlatformsStillRefitTwoBoundaries()
+{
+    // 两端位于坡面，首尾平台都完整落在扫描范围内，仍应保持每个平台两个边界角。
+    const std::vector<std::pair<double, double>> vertices{
+        {0.0, 35.0}, {40.0, 0.0}, {110.0, 0.0}, {180.0, 35.0},
+        {250.0, 35.0}, {320.0, 0.0}, {390.0, 0.0}, {460.0, 35.0}
+    };
+    auto verify = [&](bool reverse, const char* label)
+    {
+        const DenseProfileFixture fixture = BuildDenseProfile(vertices, reverse);
+        QVector<char> lapKeys(fixture.keyIndexes.size(), 0);
+        RobotCalculation::LowerWeldFilterParams params;
+        params.cornerPatternRefitEnable = true;
+        params.cornerPlatformMinSegPoints = 8;
+        params.sameTypeShortFlatSlope = 0.15;
+        const QVector<int> refit = RefitCornersByPlatformPattern(
+            fixture.projected, fixture.keyIndexes, lapKeys, params);
+        if (refit.size() != fixture.keyIndexes.size())
+        {
+            std::cerr << label << " complete endpoint platform lost a boundary\n";
+            return false;
+        }
+        return true;
+    };
+    return verify(false, "forward") && verify(true, "reverse");
+}
 }
 
 int main(int argc, char** argv)
@@ -353,6 +486,8 @@ int main(int argc, char** argv)
     if (!VerifyLapAndTrueFlatPlatformAreProtected()) return 4;
     if (!VerifyAmbiguousRecoveryIsConservative()) return 5;
     if (!VerifyRobotC009TwoReferenceDoubleCornersAreMerged()) return 6;
+    if (!VerifyEndpointClippedPlatformsKeepOneVisibleBoundary()) return 7;
+    if (!VerifyCompleteEndpointPlatformsStillRefitTwoBoundaries()) return 8;
     std::cout << "PASS: four-class periodic corner pairing regression\n";
     return 0;
 }

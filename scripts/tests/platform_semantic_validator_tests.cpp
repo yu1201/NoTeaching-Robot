@@ -137,6 +137,33 @@ int main()
             == CandidateSelection::Neither,
         "two invalid candidates fail closed");
 
+    std::vector<CandidateKeyPoint> redundantStart = MakeCandidate();
+    CandidateKeyPoint clippedStart;
+    clippedStart.rawIndex = 80;
+    clippedStart.path = -20.0;
+    clippedStart.profile = -0.1;
+    clippedStart.type = CornerType::Other;
+    redundantStart.insert(redundantStart.begin(), clippedStart);
+    Expect(!PlatformSemanticValidator::EvaluateCandidate(
+            redundantStart, flatSlopeThreshold).valid,
+        "flat start continuation rejects synthetic endpoint corner");
+
+    redundantStart.front().profile = -20.0;
+    Expect(PlatformSemanticValidator::EvaluateCandidate(
+            redundantStart, flatSlopeThreshold).valid,
+        "visible start slope preserves a complete endpoint platform");
+
+    std::vector<CandidateKeyPoint> redundantEnd = MakeCandidate();
+    CandidateKeyPoint clippedEnd;
+    clippedEnd.rawIndex = 300;
+    clippedEnd.path = 180.0;
+    clippedEnd.profile = redundantEnd.back().profile + 0.1;
+    clippedEnd.type = CornerType::Other;
+    redundantEnd.push_back(clippedEnd);
+    Expect(!PlatformSemanticValidator::EvaluateCandidate(
+            redundantEnd, flatSlopeThreshold).valid,
+        "flat end continuation rejects synthetic endpoint corner");
+
     const auto assignedGood = PlatformSemanticValidator::EvaluateAssignedSegments(
         MakeAssignedSegments(), flatSlopeThreshold);
     Expect(assignedGood.valid, "assigned high/falling/low/rising sequence passes");

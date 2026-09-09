@@ -3839,9 +3839,10 @@ QPair<int, int> FitPlatformTwoCorners(
 }
 
 // 拐点 inner/outer 结构约束(平台重算)：波纹角成对出现(谷=II、峰=OO，搭接台阶点豁免)。按类型游程把拐点
-// 归成平台(源头多检只把游程拉长、不改平台数与交替，故对多检稳)，每个平台在 [上一平台末角, 下一平台首角]
-// 区域用 FitPlatformTwoCorners 从稠密路径重算恰好 2 个边界角——多检(5→2/3→2)删对、缺点(1→2)补齐，一套
-// 覆盖。位置全由几何重算，绕开被过检污染的 prominence/间距。lap 角原样保留并按 s 归并。<=0/关 则不动。
+// 归成平台(源头多检只把游程拉长、不改平台数与交替)，中间完整平台在 [上一平台末角, 下一平台首角] 区域
+// 用 FitPlatformTwoCorners 从稠密路径重算恰好 2 个边界角。首尾可能从平台中间开始/结束：若端点到该游程
+// 边界仍为平面、而边界到相邻游程已是坡面，则只保留范围内唯一可见的边界，禁止把扫描端点外的另一边界
+// 强行补进来。位置全由几何重算，绕开被过检污染的 prominence/间距。lap 角原样保留并按 s 归并。
 QVector<int> RefitCornersByPlatformPattern(
     const QVector<GeometryProjectedPoint>& projected,
     const QVector<int>& keyIndexes,
@@ -3881,10 +3882,84 @@ QVector<int> RefitCornersByPlatformPattern(
         i = j + 1;
     }
 
+    const double flatSlopeThreshold = std::max(0.01, params.sameTypeShortFlatSlope);
+    auto chordSlope = [&](int firstKeyPosition, int secondKeyPosition) -> double
+    {
+        if (firstKeyPosition < 0 || secondKeyPosition < 0
+            || firstKeyPosition >= keyIndexes.size() || secondKeyPosition >= keyIndexes.size())
+        {
+            return std::numeric_limits<double>::infinity();
+        }
+        const GeometryProjectedPoint& first = projected[keyIndexes[firstKeyPosition]];
+        const GeometryProjectedPoint& second = projected[keyIndexes[secondKeyPosition]];
+        const double ds = second.s - first.s;
+        if (std::abs(ds) <= 1e-6)
+        {
+            return std::numeric_limits<double>::infinity();
+        }
+        return std::abs((second.smoothH - first.smoothH) / ds);
+    };
+    auto hasLapBoundaryBetween = [&](int firstKeyPosition, int secondKeyPosition) -> bool
+    {
+        const int begin = std::max(0, std::min(firstKeyPosition, secondKeyPosition));
+        const int finish = std::min(
+            static_cast<int>(isLapStepKey.size()) - 1,
+            std::max(firstKeyPosition, secondKeyPosition));
+        for (int position = begin; position <= finish; ++position)
+        {
+            if (isLapStepKey[position])
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto isClippedEndpointPlatform = [&]
+        (int endpointPosition, int visibleBoundaryPosition, int adjacentRunPosition) -> bool
+    {
+        if (hasLapBoundaryBetween(endpointPosition, adjacentRunPosition))
+        {
+            return false;
+        }
+        const double endpointSpan = std::abs(
+            projected[keyIndexes[visibleBoundaryPosition]].s
+                - projected[keyIndexes[endpointPosition]].s);
+        const double adjacentSpan = std::abs(
+            projected[keyIndexes[adjacentRunPosition]].s
+                - projected[keyIndexes[visibleBoundaryPosition]].s);
+        return endpointSpan > 0.05
+            && adjacentSpan > 0.05
+            && chordSlope(endpointPosition, visibleBoundaryPosition) < flatSlopeThreshold
+            && chordSlope(visibleBoundaryPosition, adjacentRunPosition) >= flatSlopeThreshold;
+    };
+
     QVector<int> refit;  // 重算后的自然拐点 projected 索引
     for (int r = 0; r < runs.size(); ++r)
     {
         const int i = runs[r].first, j = runs[r].second;
+        // 首端截断平台：沿扫描方向取该同类游程最后一个角，它才是离开平台进入坡面的可见边界。
+        if (r == 0 && r + 1 < runs.size())
+        {
+            const int visibleBoundaryPosition = nat[j].keyPos;
+            const int adjacentRunPosition = nat[runs[r + 1].first].keyPos;
+            if (isClippedEndpointPlatform(0, visibleBoundaryPosition, adjacentRunPosition))
+            {
+                refit.push_back(keyIndexes[visibleBoundaryPosition]);
+                continue;
+            }
+        }
+        // 尾端截断平台：取该同类游程第一个角，它是从坡面进入末端平台的可见边界。
+        if (r + 1 == runs.size() && r > 0)
+        {
+            const int visibleBoundaryPosition = nat[i].keyPos;
+            const int adjacentRunPosition = nat[runs[r - 1].second].keyPos;
+            if (isClippedEndpointPlatform(
+                    m - 1, visibleBoundaryPosition, adjacentRunPosition))
+            {
+                refit.push_back(keyIndexes[visibleBoundaryPosition]);
+                continue;
+            }
+        }
         const double regLoS = (r > 0) ? nat[runs[r - 1].second].s : startS;
         const double regHiS = (r + 1 < runs.size()) ? nat[runs[r + 1].first].s : endS;
         const QPair<int, int> two = FitPlatformTwoCorners(
