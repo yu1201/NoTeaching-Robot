@@ -1101,10 +1101,6 @@ void LaserWeldFilterDialog::BuildUi()
     validationLayoutGrid->setHorizontalSpacing(12);
     validationLayoutGrid->setVerticalSpacing(10);
 
-    m_pValidationAuditOnlyCheck = new QCheckBox("审计模式（计算并记录全部指标，但不生成可执行质量证明）");
-    m_pValidationAuditOnlyCheck->setToolTip(
-        "仅用于历史数据标定。审计模式可以生成分析产物，但实际焊接、续焊和历史焊道执行会因没有 Enforce 质量证明而被阻止。");
-
     m_pValidationCoverageCheck = new QCheckBox("采集覆盖检测");
     m_pValidationMinFinitePointSpin = new QSpinBox();
     m_pValidationMinFinitePointSpin->setRange(0, 10000000);
@@ -1238,7 +1234,7 @@ void LaserWeldFilterDialog::BuildUi()
     {
         check->setToolTip(
             "该检查及其参数只在本页配置。关闭后不参与对应质量判定；"
-            "生产使用 Enforce 时建议保持开启，历史数据标定可使用审计模式。");
+            "开启后直接按本页阈值拦截，保存时不会再套用隐藏的最低或最高安全值。");
     }
     m_pValidationSdkBaseIntegrityCheck->setToolTip(
         "该检查只作用于方法②。SDKBase生成后立即用完整点云的扫描向跨度复核；"
@@ -1388,7 +1384,6 @@ void LaserWeldFilterDialog::BuildUi()
     fixedValidationLayout->addWidget(fixedValidationHint, 6, 0, 1, 2);
     fixedValidationLayout->setColumnStretch(1, 1);
 
-    validationLayout->addWidget(m_pValidationAuditOnlyCheck);
     validationLayout->addWidget(validationGroup);
     validationLayout->addWidget(fixedValidationGroup);
     validationLayout->addStretch(1);
@@ -1429,7 +1424,7 @@ void LaserWeldFilterDialog::BuildUi()
                 QMessageBox::warning(this, "精测点云处理", message);
                 return;
             }
-            // Enforce 会在数据库事务内应用不可放宽的安全边界；立即回读，让界面显示真正生效的值。
+            // 立即回读数据库，确认每个独立门禁开关和阈值的真实持久值。
             LoadSettings();
             const QString message = "精测点云处理设置已保存，先测后焊流程将使用当前配置。";
             AppendLog(message);
@@ -1686,8 +1681,6 @@ void LaserWeldFilterDialog::LoadSettings()
         const QSignalBlocker blocker(m_pExportWorkpieceFrameDebugCheck);
         m_pExportWorkpieceFrameDebugCheck->setChecked(processingSettings.exportWorkpieceFrameDebug);
     }
-    m_pValidationAuditOnlyCheck->setChecked(
-        processingSettings.validationPolicy == PointCloudProcessingConfig::ValidationPolicy::Audit);
     m_pValidationCoverageCheck->setChecked(processingSettings.validationCoverageEnabled);
     m_pValidationMinFinitePointSpin->setValue(processingSettings.validationMinFinitePointCount);
     m_pValidationMinProjectedSpanSpin->setValue(processingSettings.validationMinProjectedSpanMm);
@@ -1898,9 +1891,6 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
         m_pExportFitDebugCloudCheck == nullptr || m_pExportFitDebugCloudCheck->isChecked();
     processingSettings.exportWorkpieceFrameDebug =
         m_pExportWorkpieceFrameDebugCheck != nullptr && m_pExportWorkpieceFrameDebugCheck->isChecked();
-    processingSettings.validationPolicy = m_pValidationAuditOnlyCheck->isChecked()
-        ? PointCloudProcessingConfig::ValidationPolicy::Audit
-        : PointCloudProcessingConfig::ValidationPolicy::Enforce;
     processingSettings.validationProfileVersion = PointCloudProcessingConfig::CURRENT_VALIDATION_PROFILE_VERSION;
     processingSettings.validationCoverageEnabled = m_pValidationCoverageCheck->isChecked();
     processingSettings.validationMinFinitePointCount = m_pValidationMinFinitePointSpin->value();

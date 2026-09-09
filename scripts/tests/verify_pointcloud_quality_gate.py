@@ -41,10 +41,13 @@ def main() -> int:
     app_h = read("include/QtWidgetsApplication4.h")
     app = read("src/QtWidgetsApplication4.cpp")
 
-    require("enum class ValidationPolicy" in config_h, "missing Audit/Enforce policy")
+    require("enum class ValidationPolicy" not in config_h
+            and "m_pValidationAuditOnlyCheck" not in validity_dialog
+            and "审计模式" not in validity_dialog,
+            "global point-cloud Audit/Enforce switch still exists")
     require("CURRENT_VALIDATION_PROFILE_VERSION = 1" in config_h, "missing versioned quality profile")
-    require("CURRENT_SAFETY_GATE_BEHAVIOR_VERSION = 2" in config_h,
-            "missing effective safety-gate behavior version")
+    require("CURRENT_SAFETY_GATE_BEHAVIOR_VERSION = 3" in config_h,
+            "missing independently configurable safety-gate behavior version")
     require('ReadIntSetting("Validation/ProfileVersion", 0)' in config_cpp,
             "legacy databases are not detected")
     require("storedValidationProfileVersion < CURRENT_VALIDATION_PROFILE_VERSION" in config_cpp,
@@ -141,26 +144,11 @@ def main() -> int:
                 f"system gate is not loaded: {field}")
         require(f'write("SafetyGates/{name}Enabled", settings.{field} ? "1" : "0")'
                 in config_cpp, f"system gate is not persisted: {field}")
-    core_helper_start = config_cpp.index(
-        "bool PointCloudProcessingConfig::CoreSafetyGatesEnabled(")
-    core_helper_end = config_cpp.index(
-        "bool PointCloudProcessingConfig::HasDisabledCoreSafetyGate(", core_helper_start)
-    core_helper = config_cpp[core_helper_start:core_helper_end]
-    require(all(f"safetyGate{name}Enabled" in core_helper
-                for name in safety_gate_names),
-            "core-gate helper must cover every configurable system gate")
-    require('ReadIntSetting("SafetyGates/BehaviorVersion", 0)' in config_cpp
-            and "storedSafetyGateBehaviorVersion < 1"
-                in config_cpp
-            and "settings.validationPolicy == ValidationPolicy::Audit" in config_cpp
-            and "HasDisabledCoreSafetyGate(settings)" in config_cpp
-            and "settings.validationPolicy = ValidationPolicy::Enforce;" in config_cpp,
-            "legacy switch-forced Audit state is not recovered to normal Enforce flow")
     save_start = config_cpp.index("bool PointCloudProcessingConfig::Save(")
     save_body = config_cpp[save_start:]
-    require("HasDisabledCoreSafetyGate(normalizedSettings)" not in save_body
-            and "normalizedSettings.validationPolicy = ValidationPolicy::Audit;" not in save_body,
-            "effective safety switches still force Audit while saving")
+    require('ReadSetting("Validation/Policy"' not in config_cpp
+            and 'write("Validation/Policy", "Enforce")' in save_body,
+            "legacy Audit configuration can still control runtime behavior")
     require('write("SafetyGates/BehaviorVersion", '
             "QString::number(CURRENT_SAFETY_GATE_BEHAVIOR_VERSION))" in save_body,
             "effective safety-gate behavior version is not persisted")
@@ -450,10 +438,11 @@ def main() -> int:
             and '!= BuildPointCloudQualityThresholds(currentSettings)' in service,
             "proof threshold evidence is not compared with the active policy")
     require('QStringLiteral("candidatePose")' in service
-            and "Audit：最终焊接姿态结构验证未通过" in service,
-            "Audit failures cannot persist an explicitly unauthorized evidence report")
+            and "pointCloudSettings.validationPolicy" not in service
+            and "审计模式" not in service,
+            "removed global audit mode still changes production processing")
     require("hasRequiredAuthorizedPose && hasProductionContext" in service
-            and "Enforce 质量通过但缺少 live-scan" in service,
+            and "质量通过但缺少 live-scan" in service,
             "an offline/missing-context result can still become authorized")
     require("settings.safetyGateInputEvidenceEnabled" in service
             and "&& inputPaths.isEmpty()" in service
@@ -511,9 +500,9 @@ def main() -> int:
             and "return !settings.safetyGateProofIntegrityEnabled" in service
             and "PointCloudProofIntegrity::VerifyProofNotDenied(reportPath, error)" in service,
             "enabled proof/input gates do not reject legacy or modified scan evidence")
-    require("productionExpectation.robotName.trimmed().isEmpty()" in rebuild
-            and "离线预览不能生成可运动授权" in rebuild,
-            "offline rebuild can synthesize a production proof without robot context")
+    require("if (AnyPointCloudProofSafetyGateEnabled(pointCloudSettings))" in rebuild
+            and "!LoadValidatedRebuildPointCloudContext(" in rebuild,
+            "enabled proof gates can be bypassed during offline rebuild")
     require("const PointCloudProcessingConfig::Settings& settings" in service
             and "productionExpectation,\n                pointCloudSettings,\n                productionContext"
                 in rebuild,
@@ -532,7 +521,7 @@ def main() -> int:
             and "currentSettings.safetyGateRobotNameBindingEnabled" in service
             and "&& !expectedRobotName.trimmed().isEmpty()" in service
             and "frozenExpectation->robotName.compare(" in service
-            and "if (productionExpectation.robotName.trimmed().isEmpty()" in service,
+            and "expectation.robotName.compare(" in service,
             "robot identity checks lost their expected comparison inputs")
     require("expectation.robotEndpoint.trimmed().isEmpty()" in service
             and "expectation.cameraSection.trimmed().isEmpty()" in service
@@ -547,14 +536,10 @@ def main() -> int:
             and "rebuildExpectation, cancelFlag" in seam_dialog,
             "preview background worker still captures a raw robot driver")
 
-    require("ApplyEnforceValidationSafetyBounds" in config_cpp,
-            "Enforce thresholds can still be weakened to an effective off state")
-    bounds_start = config_cpp.index("void ApplyEnforceValidationSafetyBounds(")
-    bounds_end = config_cpp.index("QString ReadSetting(", bounds_start)
-    bounds = config_cpp[bounds_start:bounds_end]
-    for name in quality_switches:
-        require(f"if (settings.validation{name}Enabled)" in bounds,
-                f"Enforce safety floor is not scoped to enabled quality gate: {name}")
+    require("ApplyEnforceValidationSafetyBounds" not in config_cpp
+            and "std::max(0.60, settings.validationMinLongestContinuousRatio)" not in config_cpp
+            and "std::max(300, settings.validationMinFinitePointCount)" not in config_cpp,
+            "hidden threshold safety floors still override operator values")
     require("NormalizeFiniteLoadValues(settings);" in config_cpp
             and config_cpp.index("NormalizeFiniteLoadValues(settings);")
             < config_cpp.index("settings.validationMinStationCoverageRatio = std::clamp"),

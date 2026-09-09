@@ -197,18 +197,10 @@ for name in safety_names:
     assert f'write("SafetyGates/{name}Enabled"' in config
     assert f"safetyGate{name}EnabledCheckBox" in dialog
 
-core_helper = section(
-    config,
-    "bool PointCloudProcessingConfig::CoreSafetyGatesEnabled(",
-    "bool PointCloudProcessingConfig::HasDisabledCoreSafetyGate(",
-)
-for name in safety_names:
-    assert f"safetyGate{name}Enabled" in core_helper
-assert "CURRENT_SAFETY_GATE_BEHAVIOR_VERSION = 2" in config_header
-assert 'ReadIntSetting("SafetyGates/BehaviorVersion", 0)' in config
-assert "storedSafetyGateBehaviorVersion < 1" in config
-assert "settings.validationPolicy = ValidationPolicy::Enforce;" in config
-assert "settings.validationPolicy = ValidationPolicy::Audit;" not in config
+assert "CURRENT_SAFETY_GATE_BEHAVIOR_VERSION = 3" in config_header
+assert "enum class ValidationPolicy" not in config_header
+assert 'ReadSetting("Validation/Policy"' not in config
+assert 'write("Validation/Policy", "Enforce")' in config
 assert 'write("SafetyGates/BehaviorVersion"' in config
 
 ui_core_helper = section(

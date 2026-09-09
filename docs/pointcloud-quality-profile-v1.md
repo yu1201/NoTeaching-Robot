@@ -27,14 +27,13 @@ SDK 直出模式不再用 `max(output,input)` 或固定 `rejected=0` 填充指�
 
 ## 迁移策略
 
-旧现场 `ConfigStore.db` 可能持久化六个 `Validation/*Enabled=0`，安装和 OTA 又会保留 `Data`。因此 Profile v1 使用 `Validation/ProfileVersion` 与 `Validation/Policy`：
+旧现场 `ConfigStore.db` 可能持久化六个 `Validation/*Enabled=0`，安装和 OTA 又会保留 `Data`。因此 Profile v1 使用 `Validation/ProfileVersion` 完成一次性迁移：
 
-- 缺少 ProfileVersion 或版本旧于 1：运行时迁移到 `Enforce`，不再信任历史全关值；
-- `Enforce`：质量失败直接终止分析，不生成可执行证明；
-- `Audit`：完整计算和落盘，但质量证明不授权下发、STEP job、焊接或续焊；
-- 没有 `Off` 发布状态，六类计算不可逐项关闭。
-- `Enforce` 对 101 组语料标定出的安全阈值设置不可放宽的边界；需要更宽阈值时只能切换 `Audit`，而 `Audit` 永远不能进入执行。
-- Profile、Policy 与全部阈值在 SQLite 单一事务中提交，并通过单条查询快照读取，避免中断或并发读写留下/观察到“新版本号 + 旧阈值”的混合配置。
+- 缺少 ProfileVersion 或版本旧于 1：首次读取时恢复六类质量门禁的默认开启状态，不再信任历史全关值；
+- 全局 `Audit/Enforce` 选择已删除。已启用门禁失败时直接终止对应流程，已关闭门禁则真实跳过该项判定；
+- 所有可配置门禁开关和数值阈值均以操作员保存值为准，不再叠加基于 101 组语料的隐藏最低/最高边界；语料标定值只作为新配置默认值；
+- 旧数据库的 `Validation/Policy` 键仅为兼容保留，保存时固定写入 `Enforce`，运行时不再读取或据此改变流程；
+- Profile、全部开关与阈值在 SQLite 单一事务中提交，并通过单条查询快照读取，避免中断或并发读写留下/观察到混合配置。
 
 每个生产案例在 `LaserPoint/PreciseLaserPoint_QualityGate.json` 保存算法修订 `pcq-v1-20260711-d`、策略修订哈希、阈值、指标、输入文件哈希、补偿前姿态哈希和最终 SeamComp 哈希。补偿前与最终轨迹分别使用一次 `readAll` 字节快照同时完成解析、大小和 SHA256 计算；proof 提交前还会回读并逐项比较这两个快照，任一文件在结构验证后被替换都会失败。执行时会重新比较 proof 中完整 `thresholds` 对象、处理模式和策略哈希，不能只改展示阈值而继续授权。跳过扫描、续焊、STEP 生成、下发及执行均重新验证已授权快照；实际运动前再次复核当前策略和证明。虚拟焊道没有通用跳过开关，只接受本进程刚生成、登记过路径/机器人/大小/SHA256 且写后验证为固定姿态 ±Y 直线的文件。
 
