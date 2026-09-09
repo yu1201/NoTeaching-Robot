@@ -131,6 +131,9 @@ private:
     QCheckBox* m_pValidationCoverageCheck = nullptr;
     QSpinBox* m_pValidationMinFinitePointSpin = nullptr;
     QDoubleSpinBox* m_pValidationMinProjectedSpanSpin = nullptr;
+    QCheckBox* m_pValidationSdkBaseIntegrityCheck = nullptr;
+    QDoubleSpinBox* m_pValidationMinSdkBaseCloudCoverageSpin = nullptr;
+    QDoubleSpinBox* m_pValidationMaxSdkBaseEndpointDeviationSpin = nullptr;
     QCheckBox* m_pValidationContinuityCheck = nullptr;
     QDoubleSpinBox* m_pValidationMinStationCoverageSpin = nullptr;
     QDoubleSpinBox* m_pValidationMinLongestContinuousSpin = nullptr;

@@ -1113,6 +1113,19 @@ void LaserWeldFilterDialog::BuildUi()
     m_pValidationMinProjectedSpanSpin->setDecimals(3);
     m_pValidationMinProjectedSpanSpin->setSingleStep(10.0);
 
+    m_pValidationSdkBaseIntegrityCheck = new QCheckBox("SDK基础焊道完整性检测（方法②，拟合前）");
+    m_pValidationSdkBaseIntegrityCheck->setToolTip(
+        "SDKBase生成后立即用完整点云的扫描向跨度复核；失败会在平滑、首尾截断、拟合和平台重算前停止，"
+        "错误会显示实际跨度、覆盖率、端点偏差和本页门限。");
+    m_pValidationMinSdkBaseCloudCoverageSpin = new QDoubleSpinBox();
+    m_pValidationMinSdkBaseCloudCoverageSpin->setRange(0.0, 100.0);
+    m_pValidationMinSdkBaseCloudCoverageSpin->setDecimals(1);
+    m_pValidationMinSdkBaseCloudCoverageSpin->setSingleStep(5.0);
+    m_pValidationMaxSdkBaseEndpointDeviationSpin = new QDoubleSpinBox();
+    m_pValidationMaxSdkBaseEndpointDeviationSpin->setRange(0.0, 100.0);
+    m_pValidationMaxSdkBaseEndpointDeviationSpin->setDecimals(1);
+    m_pValidationMaxSdkBaseEndpointDeviationSpin->setSingleStep(5.0);
+
     m_pValidationContinuityCheck = new QCheckBox("连续性检测");
     m_pValidationMinStationCoverageSpin = new QDoubleSpinBox();
     m_pValidationMinStationCoverageSpin->setRange(0.0, 100.0);
@@ -1205,8 +1218,16 @@ void LaserWeldFilterDialog::BuildUi()
     validationLayoutGrid->addWidget(new QLabel("输出长度/输入跨度"), 11, 0);
     validationLayoutGrid->addWidget(
         CreateUnitEditor(m_pValidationMinOutputLengthRatioSpin, "%"), 11, 1);
+    validationLayoutGrid->addWidget(m_pValidationSdkBaseIntegrityCheck, 12, 0, 1, 2);
+    validationLayoutGrid->addWidget(new QLabel("SDKBase/完整点云跨度 ≥"), 12, 2);
+    validationLayoutGrid->addWidget(
+        CreateUnitEditor(m_pValidationMinSdkBaseCloudCoverageSpin, "%"), 12, 3);
+    validationLayoutGrid->addWidget(new QLabel("最大单侧端点偏差 ≤"), 13, 0);
+    validationLayoutGrid->addWidget(
+        CreateUnitEditor(m_pValidationMaxSdkBaseEndpointDeviationSpin, "%"), 13, 1);
     const QList<QCheckBox*> validationChecks = {
         m_pValidationCoverageCheck,
+        m_pValidationSdkBaseIntegrityCheck,
         m_pValidationContinuityCheck,
         m_pValidationDenoiseRatioCheck,
         m_pValidationResidualCheck,
@@ -1219,6 +1240,10 @@ void LaserWeldFilterDialog::BuildUi()
             "该检查及其参数只在本页配置。关闭后不参与对应质量判定；"
             "生产使用 Enforce 时建议保持开启，历史数据标定可使用审计模式。");
     }
+    m_pValidationSdkBaseIntegrityCheck->setToolTip(
+        "该检查只作用于方法②。SDKBase生成后立即用完整点云的扫描向跨度复核；"
+        "失败会在平滑、首尾截断、拟合和平台重算前停止，错误会显示实际跨度、"
+        "覆盖率、端点偏差和本页门限。");
     validationLayoutGrid->setColumnStretch(1, 1);
     validationLayoutGrid->setColumnStretch(3, 1);
 
@@ -1576,7 +1601,8 @@ void LaserWeldFilterDialog::ApplyMethodEnableState()
     if (m_pAlgorithmTabWidget != nullptr)
     {
         // 点云参数页：SDK 组（①②）+ 投影提取组（③），按组禁用；④整页禁用。
-        // 滤波拟合参数页仅作用于程序拟合链（②③④）；有效性门禁对四种方法都强制生效。
+        // 滤波拟合参数页仅作用于程序拟合链（②③④）；通用有效性门禁对四种方法生效，
+        // SDKBase 完整性门禁仅作用于方法②。
         m_pAlgorithmTabWidget->setTabEnabled(0, usesSdk || usesProjection);
         m_pAlgorithmTabWidget->setTabEnabled(1, usesFitChain);
         m_pAlgorithmTabWidget->setTabEnabled(2, true);
@@ -1665,6 +1691,12 @@ void LaserWeldFilterDialog::LoadSettings()
     m_pValidationCoverageCheck->setChecked(processingSettings.validationCoverageEnabled);
     m_pValidationMinFinitePointSpin->setValue(processingSettings.validationMinFinitePointCount);
     m_pValidationMinProjectedSpanSpin->setValue(processingSettings.validationMinProjectedSpanMm);
+    m_pValidationSdkBaseIntegrityCheck->setChecked(
+        processingSettings.validationSdkBaseIntegrityEnabled);
+    m_pValidationMinSdkBaseCloudCoverageSpin->setValue(
+        processingSettings.validationMinSdkBaseCloudCoverageRatio * 100.0);
+    m_pValidationMaxSdkBaseEndpointDeviationSpin->setValue(
+        processingSettings.validationMaxSdkBaseEndpointDeviationRatio * 100.0);
     m_pValidationContinuityCheck->setChecked(processingSettings.validationContinuityEnabled);
     m_pValidationMinStationCoverageSpin->setValue(processingSettings.validationMinStationCoverageRatio * 100.0);
     m_pValidationMinLongestContinuousSpin->setValue(processingSettings.validationMinLongestContinuousRatio * 100.0);
@@ -1873,6 +1905,12 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
     processingSettings.validationCoverageEnabled = m_pValidationCoverageCheck->isChecked();
     processingSettings.validationMinFinitePointCount = m_pValidationMinFinitePointSpin->value();
     processingSettings.validationMinProjectedSpanMm = m_pValidationMinProjectedSpanSpin->value();
+    processingSettings.validationSdkBaseIntegrityEnabled =
+        m_pValidationSdkBaseIntegrityCheck->isChecked();
+    processingSettings.validationMinSdkBaseCloudCoverageRatio =
+        m_pValidationMinSdkBaseCloudCoverageSpin->value() / 100.0;
+    processingSettings.validationMaxSdkBaseEndpointDeviationRatio =
+        m_pValidationMaxSdkBaseEndpointDeviationSpin->value() / 100.0;
     processingSettings.validationContinuityEnabled = m_pValidationContinuityCheck->isChecked();
     processingSettings.validationMinStationCoverageRatio = m_pValidationMinStationCoverageSpin->value() / 100.0;
     processingSettings.validationMinLongestContinuousRatio = m_pValidationMinLongestContinuousSpin->value() / 100.0;

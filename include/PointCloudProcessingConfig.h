@@ -130,6 +130,11 @@ public:
         bool validationCoverageEnabled = true;
         int validationMinFinitePointCount = 300;
         double validationMinProjectedSpanMm = 180.0;
+        // SDK基础焊道独立完整性门禁（仅方法②）：在任何平滑、截断、拟合和平台重算前，
+        // 用完整点云沿扫描方向的稳健跨度约束 SDKBase 首末端覆盖，避免局部错误焊道因点密度高而漏过固定点数门限。
+        bool validationSdkBaseIntegrityEnabled = true;
+        double validationMinSdkBaseCloudCoverageRatio = 0.60;
+        double validationMaxSdkBaseEndpointDeviationRatio = 0.25;
         bool validationContinuityEnabled = true;
         double validationMinStationCoverageRatio = 0.55;
         double validationMinLongestContinuousRatio = 0.60;
