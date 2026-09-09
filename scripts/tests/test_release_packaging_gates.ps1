@@ -430,6 +430,24 @@ try {
     foreach ($token in @("AppVersion", "Channel", "Assert-ExpectedReleaseExecutable", "Assert-EmptyReleaseRuntimeDirectories", "Get-AuthenticodeSignature", "New-PackageGateReport", "/t:Rebuild", "ReleaseVersionMajor", "ReleaseVersionBuild")) {
         Assert-True ($releaseText.Contains($token)) "build_release_package missing hard gate token $token"
     }
+    $pointCloudRuntimeMatch = [regex]::Match(
+        $releaseText,
+        '(?s)\$pointCloudExtractionRuntimeFiles\s*=\s*@\((.*?)\)\s*New-Item')
+    Assert-True $pointCloudRuntimeMatch.Success "point-cloud runtime package list is missing"
+    $pointCloudRuntimeBlock = $pointCloudRuntimeMatch.Groups[1].Value
+    foreach ($token in @(
+        '"PointCloudExtration.dll"', '"CONCRT140.dll"', '"MSVCP140.dll"',
+        '"opencv_world480.dll"', '"pcl_common.dll"', '"pcl_features.dll"',
+        '"pcl_filters.dll"', '"pcl_kdtree.dll"', '"pcl_ml.dll"',
+        '"pcl_octree.dll"', '"pcl_sample_consensus.dll"', '"pcl_search.dll"',
+        '"pcl_segmentation.dll"', '"VCRUNTIME140.dll"', '"VCRUNTIME140_1.dll"')) {
+        Assert-True ($pointCloudRuntimeBlock.Contains($token)) "point-cloud runtime package list missing $token"
+    }
+    foreach ($legacyToken in @('opencv_core2413.dll', 'pcl_common_release.dll', 'pcl_segmentation_release.dll')) {
+        Assert-True (-not $pointCloudRuntimeBlock.Contains($legacyToken)) "point-cloud runtime package list regressed to $legacyToken"
+    }
+    Assert-True ($releaseText.Contains('F565FCBB2AFC3863501DFFC52A7FB20338DBB4DF2E16D14735FC2C7D293D8EFC')) `
+        "point-cloud SDK SHA-256 package gate is stale or missing"
     Assert-True ($releaseText.Contains("-SkipBuild is forbidden")) "SkipBuild must fail closed"
     foreach ($token in @("MSBuildExecutable", "MSBuildSha256", "WinDeployQtExecutable", "WinDeployQtSha256", "QtMsBuildPath", "/p:QtMsBuild=", "PythonExecutable", "PythonSha256", "Assert-ReleaseExternalTool")) {
         Assert-True ($releaseText.Contains($token)) "release build must explicitly bind trusted tool $token"

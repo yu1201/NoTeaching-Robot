@@ -186,6 +186,13 @@ namespace OnlineServicesConfig
 		return pattern.match(value).hasMatch();
 	}
 
+	// 设备目录与 FTP 登录账号是两套独立身份。只有与程序保留的三级账号
+	// 完全重名才会发生语义冲突；testi9、robot-01 等普通设备名必须允许。
+	inline bool IsReservedDeviceName(const QString& value)
+	{
+		return IsDefaultFtpAccount(value);
+	}
+
 	inline QString DefaultDeviceName()
 	{
 		const QString value = QSysInfo::machineHostName().trimmed();

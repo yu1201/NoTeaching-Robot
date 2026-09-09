@@ -59,6 +59,15 @@ int main()
         std::cerr << "fixed account allow-list is incorrect\n";
         return 2;
     }
+    if (!OnlineServicesConfig::IsReservedDeviceName(OnlineServicesConfig::FullAccessAccount())
+        || !OnlineServicesConfig::IsReservedDeviceName(OnlineServicesConfig::FtpAccessAccount())
+        || !OnlineServicesConfig::IsReservedDeviceName(OnlineServicesConfig::UploadOnlyAccount())
+        || OnlineServicesConfig::IsReservedDeviceName(QStringLiteral("testi9"))
+        || OnlineServicesConfig::IsReservedDeviceName(QStringLiteral("robot-01")))
+    {
+        std::cerr << "device-name reservation incorrectly rejects ordinary device directories\n";
+        return 6;
+    }
     if (OnlineServicesConfig::AccessLevelForAccount(OnlineServicesConfig::FullAccessAccount())
             != OnlineServicesConfig::AccessLevel::Full
         || OnlineServicesConfig::AccessLevelForAccount(OnlineServicesConfig::FtpAccessAccount())
