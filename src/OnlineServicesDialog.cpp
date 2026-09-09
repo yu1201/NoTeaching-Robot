@@ -87,11 +87,6 @@ namespace
 	constexpr qint64 kOtaManifestClockSkewSeconds = 10LL * 60;
 	constexpr char kOtaSignatureAlgorithm[] = "RSA-PKCS1-SHA256";
 
-	bool IsServerConfigUnlockCode(const QString& input)
-	{
-		// 本机防误操作口令：不参与服务器认证，也不落库。
-		return input == QString(6, QLatin1Char('8'));
-	}
 	// RSA-3072 公钥；对应私钥仅以 CurrentUser DPAPI 形式保存在仓库外。
 	constexpr char kOtaReleasePublicKeyBlobBase64[] =
 		"UlNBMQAMAAADAAAAgAEAAAAAAAAAAAAAAQAB4ax2i7VFMjmJhtYWOJvaLLN+sAE/nXCUimEtrdo9l1co8mT3rYz2vy5lsB+ztcN+c+iXZ+G6YMy1Xrfp2AN3jKd6ZfXNG9z0UPXDlS/0AlUnONobSyVSkMtarODxrPNKb9Kq7+XkF/sgOxYzfgg9QVU8lfqD4pInm54C8+6OQDD8WpckvmUqOZ4jHeqgEzvavPiRyI+IR0WYDJdFh/NhQRpxGmzgNFvzhvzHyvALJ+KxKh7+YW0/r3+YvRaJeTD+bFJxO0q/ZeoMjtTz+WY9WgCHB+VnH7VKDtpUd2lPxYXc8y1wIkc78FYMQZFWcXGV5GVn7Lf8jG5QVmrOncg+GvkNErdAUlz+B1cntccuVhBQpeXVVK8J9gz802O4dDXU1xKSsHScEDYC4MtwsR/M9YWcackdYsBnMAPSu5fYqzTDWkQR2HbfYRom55QVh8cmVO3fK4DZ0Iyehky8Vi3UWusSbzkYhAsfLrn/c2eY7Jx4COFK/ZVyZWMRgS79sjnz";
@@ -970,7 +965,7 @@ void OnlineServicesDialog::BuildUi()
 	m_saveServerConfigBtn->setMinimumHeight(40);
 	m_saveServerConfigBtn->setProperty("kind", "primary");
 	QLabel* configHint = new QLabel(QStringLiteral(
-		"服务器配置默认锁定；所有已登录身份均可查看，输入本机修改密码后才可编辑。"), this);
+		"服务器配置默认锁定；全权限账号登录后可点击“修改配置”进行编辑。"), this);
 	configHint->setWordWrap(true);
 	configHint->setStyleSheet(QStringLiteral("color: #7E9AA6; font-size: 12px;"));
 	configLayout->addWidget(new QLabel(QStringLiteral("服务器 IP"), this), 0, 0);
@@ -1119,8 +1114,25 @@ void OnlineServicesDialog::BuildUi()
 		m_accountTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
 		m_accountTable->setAlternatingRowColors(true);
 		accLayout->addWidget(m_accountTable, 1);
-		QLabel* accHint = new QLabel(QStringLiteral(
-			"账号管理和服务器统计仅对全权限账号开放；管理令牌由程序自动使用，不在界面显示。"), this);
+		const bool adminTransportReady = HasFullAccess()
+			&& CanUseSecureAdminTransport()
+			&& !OnlineServicesConfig::AdminToken().trimmed().isEmpty();
+		accAddBtn->setEnabled(adminTransportReady);
+		accPwBtn->setEnabled(adminTransportReady);
+		accDelBtn->setEnabled(adminTransportReady);
+		accRefreshBtn->setEnabled(adminTransportReady);
+		if (!adminTransportReady)
+		{
+			m_accountTable->setRowCount(1);
+			m_accountTable->setSpan(0, 0, 1, 3);
+			QTableWidgetItem* unavailableItem = new QTableWidgetItem(QStringLiteral(
+				"账号管理接口未启用 HTTPS；为避免管理令牌和密码经公网明文发送，列表与修改功能已停用。"));
+			unavailableItem->setFlags(unavailableItem->flags() & ~Qt::ItemIsSelectable);
+			m_accountTable->setItem(0, 0, unavailableItem);
+		}
+		QLabel* accHint = new QLabel(adminTransportReady
+			? QStringLiteral("账号管理仅对全权限账号开放；管理令牌由程序自动使用，不在界面显示。")
+			: QStringLiteral("需先在服务器部署可信 HTTPS 管理入口；FTP 上传和远程数据读取不受影响。"), this);
 		accHint->setWordWrap(true);
 		accHint->setStyleSheet("color: #7E9AA6; font-size: 11px;");
 		accLayout->addWidget(accHint);
@@ -1599,6 +1611,11 @@ void OnlineServicesDialog::SaveConfigFromUi()
 		AppendLog(QStringLiteral("设备名称未保存：不能包含路径字符、点目录或控制字符。"));
 		return;
 	}
+	if (OnlineServicesConfig::IsReservedDeviceName(deviceName))
+	{
+		AppendLog(QStringLiteral("设备名称未保存：不能与系统保留 FTP 账号同名。"));
+		return;
+	}
 	OnlineServicesConfig::SetServerHost(host);
 	OnlineServicesConfig::SetDeviceName(deviceName);
 	SetServerConfigEditing(false);
@@ -1613,29 +1630,12 @@ void OnlineServicesDialog::RequestServerConfigEdit()
 		AppendLog(QStringLiteral("远程数据操作进行中，暂不能修改服务器配置。"));
 		return;
 	}
-	bool accepted = false;
-	const QString input = QInputDialog::getText(
-		this,
-		QStringLiteral("修改服务器配置"),
-		QStringLiteral("请输入本机配置修改密码："),
-		QLineEdit::Password,
-		QString(),
-		&accepted);
-	if (!accepted)
+	if (!AuthorizePrivilegedAction(QStringLiteral("修改服务器配置")))
 	{
-		return;
-	}
-	if (!IsServerConfigUnlockCode(input))
-	{
-		AppendLog(QStringLiteral("服务器配置修改密码错误，配置保持锁定。"));
-		QMessageBox::warning(
-			this,
-			QStringLiteral("密码错误"),
-			QStringLiteral("本机配置修改密码错误，未开放编辑。"));
 		return;
 	}
 	SetServerConfigEditing(true);
-	AppendLog(QStringLiteral("服务器配置已临时解锁；保存后会自动重新锁定。"));
+	AppendLog(QStringLiteral("全权限会话已验证，服务器配置已临时解锁；保存后会自动重新锁定。"));
 	if (m_serverHostEdit != nullptr)
 	{
 		m_serverHostEdit->setFocus();
@@ -1655,7 +1655,9 @@ void OnlineServicesDialog::SetServerConfigEditing(bool editing)
 	}
 	if (m_editServerConfigBtn != nullptr)
 	{
-		m_editServerConfigBtn->setEnabled(!m_serverConfigEditing && !m_remoteBusy);
+		m_editServerConfigBtn->setEnabled(HasFullAccess() && !m_serverConfigEditing && !m_remoteBusy);
+		m_editServerConfigBtn->setToolTip(HasFullAccess()
+			? QString() : QStringLiteral("修改服务器和设备名称仅对全权限账号开放。"));
 	}
 	if (m_saveServerConfigBtn != nullptr)
 	{

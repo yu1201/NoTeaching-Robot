@@ -795,11 +795,11 @@ void ScanDataUploader::StartWorkerIfIdle()
 	config.password = OnlineServicesConfig::FtpPassword().toStdString();
 	config.deviceName = OnlineServicesConfig::DeviceName().trimmed();
 	if (!AppPaths::IsSafePathComponent(config.deviceName)
-		|| OnlineServicesConfig::IsServerAccountName(config.deviceName))
+		|| OnlineServicesConfig::IsReservedDeviceName(config.deviceName))
 	{
 		m_busy.store(false);
 		emit uploadStatus(QStringLiteral(
-			"上传未配置：设备名称必须是安全的单一目录名，且不能使用服务器账号格式。"));
+			"上传未配置：设备名称必须是安全的单一目录名，且不能与系统保留 FTP 账号同名。"));
 		return;
 	}
 	if (!OnlineServicesConfig::IsDefaultFtpAccount(QString::fromStdString(config.user)))

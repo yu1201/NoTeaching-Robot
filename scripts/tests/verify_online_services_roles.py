@@ -50,13 +50,14 @@ def main() -> int:
     for token in (
         "RequestServerConfigEdit",
         "SetServerConfigEditing(false)",
-        "QLineEdit::Password",
-        "IsServerConfigUnlockCode",
-        "QString(6, QLatin1Char('8'))",
+        'AuthorizePrivilegedAction(QStringLiteral("修改服务器配置"))',
         "edit->setEnabled(m_serverConfigEditing)",
         "m_saveServerConfigBtn->setEnabled(m_serverConfigEditing",
+        "IsReservedDeviceName(deviceName)",
     ):
-        require(token in dialog, f"local password-locked server configuration is missing: {token}")
+        require(token in dialog, f"full-access server configuration gate is missing: {token}")
+    require("IsServerConfigUnlockCode" not in dialog,
+            "obsolete hard-coded local server-configuration password remains")
     require(dialog.count("SaveConfigFromUi();") == 1,
             "an unrelated online-service action can still implicitly save unlocked configuration")
     require("setNavRowEnabled(m_remoteNavRow, ftpAllowed" in dialog,
@@ -77,8 +78,14 @@ def main() -> int:
         require(token in dialog, f"secure server-stats fallback is missing: {token}")
     require('if (!CanUseSecureAdminTransport() || !adminUrl.isValid())' in dialog,
             "public plaintext HTTP can send the management token")
+    require("账号管理接口未启用 HTTPS" in dialog and "adminTransportReady" in dialog,
+            "account page does not explain or disable unavailable insecure management actions")
     require(uploader.count("IsDefaultFtpAccount") >= 2,
             "background upload does not enforce the three fixed accounts")
+    require("IsReservedDeviceName(config.deviceName)" in uploader,
+            "background upload does not distinguish reserved accounts from ordinary device names")
+    require("IsServerAccountName(config.deviceName)" not in uploader,
+            "ordinary account-shaped device names such as testi9 are still rejected")
     require("updateGroup" in dialog and "m_checkUpdateBtn" in dialog,
             "online upgrade page was removed from restricted sessions")
     for token in (

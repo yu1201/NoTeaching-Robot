@@ -209,11 +209,11 @@ def main() -> int:
         "m_serverConfigNavRow",
         "RequestServerConfigEdit",
         "SetServerConfigEditing",
-        "QLineEdit::Password",
-        "IsServerConfigUnlockCode",
-        "QString(6, QLatin1Char('8'))",
+        'AuthorizePrivilegedAction(QStringLiteral("修改服务器配置"))',
     ):
         require(token in online_dialog, f"online-service live admin gate missing: {token}")
+    require("IsServerConfigUnlockCode" not in online_dialog,
+            "obsolete hard-coded server-configuration unlock code remains")
 
     admin_request_match = re.search(
         r"void OnlineServicesDialog::AdminRequest\(.*?\n\}\n\nvoid OnlineServicesDialog::RefreshServerStats",
