@@ -479,6 +479,10 @@ class TrustedVerifierFixture:
 
 
 class LocalGateTests(unittest.TestCase):
+    def test_production_sftp_total_budget_allows_slow_dual_channel_upload(self):
+        self.assertEqual(ota.SFTP_IO_TIMEOUT_SECONDS, 30)
+        self.assertGreaterEqual(ota.SFTP_TOTAL_TIMEOUT_SECONDS, 2 * 60 * 60)
+
     def test_strict_version_rejects_malformed_or_impossible_values(self):
         for value in ("v2026.07.12.1200", "2026.7.12.1200", "2026.02.30.1200", "2026.07.12.bad"):
             with self.subTest(value=value), self.assertRaises(ota.ReleaseGateError):
